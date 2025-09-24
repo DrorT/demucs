@@ -1,3 +1,35 @@
+VENV := pydemucs
+PY := $(VENV)/bin/python
+PIP := $(VENV)/bin/pip
+
+.PHONY: help venv install export compare clean
+
+help:
+	@echo "Targets:"
+	@echo "  make venv      - create venv $(VENV)"
+	@echo "  make install   - install deps into $(VENV)"
+	@echo "  make export    - export htdemucs core to ONNX"
+	@echo "  make compare   - compare PyTorch vs ONNX on test.mp3"
+	@echo "  make clean     - remove ONNX artifacts"
+
+venv:
+	python3 -m venv $(VENV)
+	$(PY) -V
+
+install: venv
+	# PyTorch CPU wheels for Python 3.12
+	$(PIP) install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1 torchaudio==2.4.1
+	# Project deps and ONNX runtime
+	$(PIP) install dora-search einops julius lameenc openunmix pyyaml tqdm onnx onnxruntime soundfile
+
+export: install
+	$(PY) -m tools.export_onnx -n htdemucs -o htdemucs_core.onnx --opset 17 --dynamic
+
+compare: export
+	$(PY) -m tools.compare_onnx -n htdemucs -m htdemucs_core.onnx -i test.mp3 --sr 44100
+
+clean:
+	rm -f htdemucs_core.onnx
 all: linter tests
 
 linter:

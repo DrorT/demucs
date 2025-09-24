@@ -215,6 +215,20 @@ make onnx_separate INPUT=music.mp3 OUT=separated_onnx ONNX=htdemucs_core.onnx NA
 
 Outputs are written to `OUT/<track>/{drums,bass,other,vocals}.<ext>`.
 
+Performance and device options:
+
+```bash
+# Force CPU or CUDA (auto picks CUDA if available)
+python -m tools.simple_separate_onnx song.mp3 --device cpu
+python -m tools.simple_separate_onnx song.mp3 --device cuda
+
+# Print detailed timing and write JSON metrics
+python -m tools.simple_separate_onnx song.mp3 --profile --json-metrics metrics.json
+
+# Limit ONNX Runtime CPU threads
+python -m tools.simple_separate_onnx song.mp3 --device cpu --ort-num-threads 4
+```
+
 ## Separating tracks
 
 In order to try Demucs, you can just run from any folder (as long as you properly installed it)

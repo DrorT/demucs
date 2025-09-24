@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import json
+import time
 from pathlib import Path
 import numpy as np
 import torch
 import onnxruntime as ort
+from typing import Optional
 
 from demucs.audio import AudioFile, save_audio, convert_audio_channels
 from demucs.spec import spectro, ispectro
@@ -69,11 +72,36 @@ def separate_with_onnx(
     segment: float,
     overlap: float = 0.25,
     stem_ext: str = "wav",
+    device: str = "auto",
+    profile: bool = False,
+    json_metrics: Optional[Path] = None,
+    ort_num_threads: int | None = None,
 ):
-    # Prepare ONNX session
-    sess = ort.InferenceSession(str(onnx_path), providers=ort.get_available_providers())
+    t_start = time.perf_counter()
+    # Prepare ONNX session with provider/device selection
+    available = ort.get_available_providers()
+    if device == "cuda":
+        if "CUDAExecutionProvider" not in available:
+            raise RuntimeError("CUDAExecutionProvider not available. Install onnxruntime-gpu or choose --device cpu/auto.")
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    elif device == "cpu":
+        providers = ["CPUExecutionProvider"]
+    else:  # auto
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available else ["CPUExecutionProvider"]
+
+    so = ort.SessionOptions()
+    if ort_num_threads is not None and ort_num_threads > 0:
+        # Set both intra/inter; users can tune further if desired
+        so.intra_op_num_threads = ort_num_threads
+        so.inter_op_num_threads = max(1, ort_num_threads // 2)
+
+    t_sess0 = time.perf_counter()
+    sess = ort.InferenceSession(str(onnx_path), sess_options=so, providers=providers)
+    t_sess1 = time.perf_counter()
+    used_provider = sess.get_providers()[0] if hasattr(sess, "get_providers") else providers[0]
 
     # Read audio
+    t_io0 = time.perf_counter()
     af = AudioFile(input_path)
     # Read single audio stream, convert channels at load (no resample in AudioFile)
     wav = af.read(streams=0, samplerate=None, channels=None)
@@ -83,6 +111,7 @@ def separate_with_onnx(
         import julius
 
         wav = julius.resample_frac(wav, af.samplerate(), samplerate)
+    t_io1 = time.perf_counter()
 
     # [C,T] -> [1,C,T]
     mix_full = wav.unsqueeze(0)
@@ -104,6 +133,12 @@ def separate_with_onnx(
     out_total = torch.zeros(B, S, C, L)
     sum_weight = torch.zeros(L)
 
+    # Timers
+    t_spec_total = 0.0
+    t_infer_total = 0.0
+    t_post_total = 0.0
+    chunks = 0
+
     for off in offsets:
         chunk = mix_full[..., off : off + seg_len]
         # Pad to seg_len
@@ -111,17 +146,22 @@ def separate_with_onnx(
             chunk = torch.nn.functional.pad(chunk, (0, seg_len - chunk.shape[-1]))
 
         # Pre: STFT and magnitude
+        t0 = time.perf_counter()
         z = _spec_like(chunk, nfft)
         mag = _magnitude_cac(z, cac)
+        t1 = time.perf_counter()
 
         # Run ONNX core
+        t2 = time.perf_counter()
         inputs = {
             "mag": mag.cpu().numpy(),
             "mix": chunk.cpu().numpy(),
         }
         spec_out, time_out = sess.run(None, inputs)
+        t3 = time.perf_counter()
 
         # Post: mask/iSTFT + sum with time branch
+        t4 = time.perf_counter()
         zout = _mask_cac(spec_out, cac)
         x = _ispec_like(zout, chunk.shape[-1], nfft)
         xt = torch.from_numpy(time_out)
@@ -131,15 +171,81 @@ def separate_with_onnx(
         out_total[..., off : off + out_len] += (weight[:out_len] * y[..., :out_len]).unsqueeze(0)
         sum_weight[off : off + out_len] += weight[:out_len]
 
+        t5 = time.perf_counter()
+        t_spec_total += (t1 - t0)
+        t_infer_total += (t3 - t2)
+        t_post_total += (t5 - t4)
+        chunks += 1
+
     out_final = out_total / sum_weight.clamp_min(1e-6)
     out_final = out_final.squeeze(0)  # [S,C,T]
 
     # Save stems
+    t_save0 = time.perf_counter()
     track_name = input_path.stem
     base_dir = output_dir / track_name
     base_dir.mkdir(parents=True, exist_ok=True)
     for k, name in enumerate(SOURCES):
         save_audio(out_final[k], base_dir / f"{name}.{stem_ext}", samplerate)
+    t_save1 = time.perf_counter()
+
+    t_end = time.perf_counter()
+
+    # Metrics
+    audio_seconds = L / float(samplerate)
+    total_time = t_end - t_start
+    processing_time = (t_sess1 - t_sess0) + (t_io1 - t_io0) + t_spec_total + t_infer_total + t_post_total + (t_save1 - t_save0)
+    rtf = total_time / max(1e-9, audio_seconds)
+    metrics = {
+        "file": str(input_path),
+        "samplerate": samplerate,
+        "channels": channels,
+        "nfft": nfft,
+        "cac": bool(cac),
+        "segment_seconds": float(segment),
+        "overlap": float(overlap),
+        "audio_seconds": audio_seconds,
+        "chunks": chunks,
+        "onnxruntime_version": getattr(ort, "__version__", "unknown"),
+        "provider": used_provider,
+        "providers_requested": providers,
+        "ort_num_threads": ort_num_threads,
+        "time_total_sec": total_time,
+        "time_session_create_sec": (t_sess1 - t_sess0),
+        "time_io_sec": (t_io1 - t_io0),
+        "time_spec_total_sec": t_spec_total,
+        "time_infer_total_sec": t_infer_total,
+        "time_post_total_sec": t_post_total,
+        "time_save_sec": (t_save1 - t_save0),
+        "rtf": rtf,
+        "avg_infer_ms_per_chunk": (t_infer_total / max(1, chunks)) * 1000.0,
+    }
+
+    # Always print concise summary
+    print(
+        f"Provider: {used_provider} | audio: {audio_seconds:.2f}s | total: {total_time:.3f}s | RTF: {rtf:.3f} | "
+        f"chunks: {chunks} | infer_total: {t_infer_total:.3f}s (~{metrics['avg_infer_ms_per_chunk']:.1f} ms/chunk)"
+    )
+
+    if profile:
+        print(
+            "Profile: session={:.3f}s, io={:.3f}s, spec={:.3f}s, infer={:.3f}s, post={:.3f}s, save={:.3f}s".format(
+                metrics["time_session_create_sec"],
+                metrics["time_io_sec"],
+                metrics["time_spec_total_sec"],
+                metrics["time_infer_total_sec"],
+                metrics["time_post_total_sec"],
+                metrics["time_save_sec"],
+            )
+        )
+
+    if json_metrics:
+        try:
+            Path(json_metrics).parent.mkdir(parents=True, exist_ok=True)
+            with open(json_metrics, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2)
+        except Exception as e:
+            print(f"Warning: failed to write metrics JSON to {json_metrics}: {e}")
     return base_dir
 
 
@@ -155,6 +261,10 @@ def main():
     p.add_argument("--segment", type=float, default=None)
     p.add_argument("--overlap", type=float, default=0.25)
     p.add_argument("--ext", default="wav", choices=["wav", "mp3", "flac"])
+    p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Select ORT device/provider")
+    p.add_argument("--ort-num-threads", type=int, default=None, help="Limit ONNX Runtime CPU threads")
+    p.add_argument("--profile", action="store_true", help="Print detailed timing breakdown")
+    p.add_argument("--json-metrics", type=Path, default=None, help="Write metrics JSON to this path")
     args = p.parse_args()
 
     # Load torch model only to read metadata (segment, sr, channels, cac, nfft)
@@ -183,6 +293,10 @@ def main():
         segment=segment,
         overlap=args.overlap,
         stem_ext=args.ext,
+        device=args.device,
+        profile=args.profile,
+        json_metrics=args.json_metrics,
+        ort_num_threads=args.ort_num_threads,
     )
     print(f"Saved stems to: {out_dir}")
 

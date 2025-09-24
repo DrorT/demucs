@@ -274,7 +274,11 @@ export class DemucsOnnx {
       let last = T - 1;
       while (last >= 0 && sumW[last] === 0) last--;
       if (last < T - 1) {
-        console.warn(`[demucs] coverage ends at ${(last / samplerate).toFixed(2)}s out of ${(T / samplerate).toFixed(2)}s`);
+        console.warn(
+          `[demucs] coverage ends at ${(last / samplerate).toFixed(
+            2
+          )}s out of ${(T / samplerate).toFixed(2)}s`
+        );
       }
     }
     const stems: Record<string, Float32Array> = {

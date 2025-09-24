@@ -2,7 +2,7 @@ VENV := pydemucs
 PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-.PHONY: help venv install export compare clean
+.PHONY: help venv install export compare onnx_separate clean
 
 help:
 	@echo "Targets:"
@@ -10,6 +10,7 @@ help:
 	@echo "  make install   - install deps into $(VENV)"
 	@echo "  make export    - export htdemucs core to ONNX"
 	@echo "  make compare   - compare PyTorch vs ONNX on test.mp3"
+	@echo "  make onnx_separate INPUT=... [ONNX=...] [OUT=...] [NAME=...] [EXT=wav]"
 	@echo "  make clean     - remove ONNX artifacts"
 
 venv:
@@ -27,6 +28,12 @@ export: install
 
 compare: export
 	$(PY) -m tools.compare_onnx -n htdemucs -m htdemucs_core.onnx -i test.mp3 --sr 44100
+
+# Example:
+# make onnx_separate INPUT=your.mp3 OUT=separated_onnx ONNX=htdemucs_core.onnx NAME=htdemucs EXT=wav
+onnx_separate:
+	@if [ -z "$(INPUT)" ]; then echo "Usage: make onnx_separate INPUT=your.mp3 [ONNX=htdemucs_core.onnx] [OUT=separated_onnx] [NAME=htdemucs] [EXT=wav]"; exit 1; fi
+	$(PY) -m tools.simple_separate_onnx $(INPUT) --onnx $${ONNX:-htdemucs_core.onnx} --out $${OUT:-separated_onnx} -n $${NAME:-htdemucs} --ext $${EXT:-wav}
 
 clean:
 	rm -f htdemucs_core.onnx

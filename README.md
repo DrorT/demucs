@@ -197,6 +197,24 @@ direnv allow   # uses .envrc to source pydemucs when you cd here
 
 More details in `docs/onnx.md`.
 
+### ONNX Separation (Core-only)
+
+Run full separation using the exported ONNX core with Python pre/post (STFT/iSTFT) — useful to validate before browser integration.
+
+- One-shot (default names):
+
+```bash
+make onnx_separate INPUT=test.mp3
+```
+
+- Custom paths/options:
+
+```bash
+make onnx_separate INPUT=music.mp3 OUT=separated_onnx ONNX=htdemucs_core.onnx NAME=htdemucs EXT=wav
+```
+
+Outputs are written to `OUT/<track>/{drums,bass,other,vocals}.<ext>`.
+
 ## Separating tracks
 
 In order to try Demucs, you can just run from any folder (as long as you properly installed it)

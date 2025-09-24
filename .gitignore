@@ -19,4 +19,5 @@ Session.vim
 htdemucs_core.onnx
 .envrc
 /separated_simple
+/separated_onnx
 *.mp3

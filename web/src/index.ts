@@ -270,6 +270,13 @@ export class DemucsOnnx {
       const len = Math.min(segLen, T - off);
       for (let t = 0; t < len; t++) sumW[off + t] += weight[t];
     }
+    if (perfEnabled) {
+      let last = T - 1;
+      while (last >= 0 && sumW[last] === 0) last--;
+      if (last < T - 1) {
+        console.warn(`[demucs] coverage ends at ${(last / samplerate).toFixed(2)}s out of ${(T / samplerate).toFixed(2)}s`);
+      }
+    }
     const stems: Record<string, Float32Array> = {
       drums: new Float32Array(T * C),
       bass: new Float32Array(T * C),

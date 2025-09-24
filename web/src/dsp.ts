@@ -80,18 +80,12 @@ export function reflectPad1d(
 ): Float32Array {
   const L = x.length;
   const y = new Float32Array(left + L + right);
-  // left reflect
-  for (let i = 0; i < left; i++) {
-    const idx = left - i;
-    y[i] = x[idx];
-  }
+  // left reflect: x[1], x[2], ..., x[left]
+  for (let i = 0; i < left; i++) y[i] = x[1 + i];
   // center
   y.set(x, left);
-  // right reflect
-  for (let i = 0; i < right; i++) {
-    const idx = L - 2 - i;
-    y[left + L + i] = x[Math.max(0, Math.min(L - 1, idx))];
-  }
+  // right reflect: x[L-2], x[L-3], ..., x[L-right-1]
+  for (let i = 0; i < right; i++) y[left + L + i] = x[L - 2 - i];
   return y;
 }
 

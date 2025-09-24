@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demucs ONNX Web Demo</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 16px;
+      }
+      .row {
+        margin: 8px 0;
+      }
+      audio {
+        width: 100%;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+      .stem {
+        border: 1px solid #ccc;
+        padding: 8px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Demucs ONNX Web Demo</h1>
+    <div class="row"><input type="file" id="file" accept="audio/*" /></div>
+    <div class="row">
+      <button id="run">Separate</button> <span id="status"></span>
+    </div>
+    <div class="row"><audio id="orig" controls></audio></div>
+    <h3>Stems</h3>
+    <div class="grid" id="stems"></div>
+    <script type="module" src="/src/demo.ts"></script>
+  </body>
+</html>

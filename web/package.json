@@ -1,0 +1,19 @@
+{
+  "name": "demucs-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "postinstall": "mkdir -p public/ort-wasm && cp node_modules/onnxruntime-web/dist/*.wasm public/ort-wasm/ 2>/dev/null || true && cp node_modules/onnxruntime-web/dist/*.mjs public/ort-wasm/ 2>/dev/null || true && cp node_modules/onnxruntime-web/dist/*.worker.js public/ort-wasm/ 2>/dev/null || true && cp node_modules/onnxruntime-web/dist/*.js public/ort-wasm/ 2>/dev/null || true"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.19.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^5.0.0"
+  }
+}

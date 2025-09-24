@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demucs ONNX Web Demo</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 16px;
+      }
+      .row {
+        margin: 8px 0;
+      }
+      audio {
+        width: 100%;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+      .stem {
+        border: 1px solid #ccc;
+        padding: 8px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Demucs ONNX Web Demo</h1>
+    <div class="row"><input type="file" id="file" accept="audio/*" /></div>
+    <div class="row">
+      <label
+        >Device:
+        <select id="device">
+          <option value="wasm" selected>WASM</option>
+          <option value="webgl">WebGL</option>
+          <option value="webgpu">WebGPU</option>
+          <option value="auto">Auto (WebGPU/WebGL/WASM)</option>
+        </select>
+      </label>
+      <label style="margin-left: 12px"
+        >Max seconds:
+        <input
+          id="maxsec"
+          type="number"
+          min="0"
+          step="1"
+          placeholder="0=all"
+          value="30"
+          style="width: 6em"
+        />
+      </label>
+      <label style="margin-left: 12px"
+        >WASM threads:
+        <input
+          id="threads"
+          type="number"
+          min="1"
+          max="8"
+          value="1"
+          style="width: 4em"
+        />
+      </label>
+      <label style="margin-left: 12px"
+        >SIMD:
+        <input id="simd" type="checkbox" checked />
+      </label>
+      <label style="margin-left: 12px">
+        Log perf:
+        <input id="logperf" type="checkbox" />
+      </label>
+      <label style="margin-left: 12px"
+        >Segment seconds:
+        <input
+          id="segsec"
+          type="number"
+          min="2"
+          max="12"
+          step="0.1"
+          value="7.8"
+          style="width: 5em"
+        />
+      </label>
+    </div>
+    <div class="row">
+      <button id="run">Separate</button> <span id="status"></span>
+    </div>
+    <div class="row">
+      <progress
+        id="prog"
+        value="0"
+        max="1"
+        style="width: 100%; display: none"
+      ></progress>
+    </div>
+    <div class="row"><audio id="orig" controls></audio></div>
+    <h3>Stems</h3>
+    <div class="grid" id="stems"></div>
+    <script src="/ort-wasm/ort.all.js"></script>
+    <script type="module" src="/src/demo.ts"></script>
+  </body>
+</html>

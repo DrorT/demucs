@@ -21,3 +21,5 @@ htdemucs_core.onnx
 /separated_simple
 /separated_onnx
 *.mp3
+/web/node_modules
+/web/public/ort-wasm

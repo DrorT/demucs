@@ -1,0 +1,7 @@
+{
+  "samplerate": 44100,
+  "channels": 2,
+  "nfft": 4096,
+  "cac": true,
+  "segment": 7.8
+}

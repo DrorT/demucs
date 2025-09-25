@@ -49,6 +49,9 @@ const origEl = document.getElementById("orig") as HTMLAudioElement;
 const statusEl = document.getElementById("status") as HTMLSpanElement;
 const stemsEl = document.getElementById("stems") as HTMLDivElement;
 const logperfEl = document.getElementById("logperf") as HTMLInputElement;
+const allCombinesEl = document.getElementById(
+  "allcombines"
+) as HTMLInputElement;
 
 let arrayBuffer: ArrayBuffer | null = null;
 
@@ -89,15 +92,40 @@ runEl.addEventListener("click", async () => {
     progEl.style.display = "block";
     progEl.value = 0;
     const t0 = performance.now();
-    const { stems, provider } = await demucs.separate(pcm, {
-      maxSeconds:
-        Math.max(0, parseInt(maxsecEl?.value || "0", 10)) || undefined,
-      onProgress: (p) => {
-        progEl.value = p;
-      },
-      segmentSeconds: Math.max(2, parseFloat(segsecEl?.value || "7.8")),
-      logPerf: !!logperfEl?.checked,
-    });
+    const runOnce = async (combineMode?: "sum" | "spec" | "time") =>
+      demucs.separate(pcm, {
+        maxSeconds:
+          Math.max(0, parseInt(maxsecEl?.value || "0", 10)) || undefined,
+        onProgress: (p) => {
+          progEl.value = p;
+        },
+        segmentSeconds: Math.max(2, parseFloat(segsecEl?.value || "7.8")),
+        logPerf: !!logperfEl?.checked,
+        combineMode,
+      });
+    let provider = "";
+    let results: Array<{ label: string; stems: Record<string, Float32Array> }> =
+      [];
+    if (allCombinesEl?.checked) {
+      const tA = performance.now();
+      const all = await demucs.separateAll(pcm, {
+        maxSeconds:
+          Math.max(0, parseInt(maxsecEl?.value || "0", 10)) || undefined,
+        onProgress: (p) => (progEl.value = p),
+        segmentSeconds: Math.max(2, parseFloat(segsecEl?.value || "7.8")),
+        logPerf: !!logperfEl?.checked,
+      });
+      provider = all.provider;
+      results.push({ label: "sum", stems: all.results.sum });
+      results.push({ label: "spec", stems: all.results.spec });
+      results.push({ label: "time", stems: all.results.time });
+      const tB = performance.now();
+      console.log(`[demucs] all-combines run took ${(tB - tA).toFixed(0)} ms`);
+    } else {
+      const single = await runOnce("sum");
+      provider = single.provider;
+      results.push({ label: "sum", stems: single.stems });
+    }
     const t1 = performance.now();
     statusEl.textContent = `Done in ${(t1 - t0).toFixed(
       0
@@ -105,13 +133,21 @@ runEl.addEventListener("click", async () => {
     progEl.style.display = "none";
 
     stemsEl.innerHTML = "";
-    for (const name of ["drums", "bass", "other", "vocals"]) {
-      const blob = toWavBlob(stems[name], meta.samplerate, meta.channels);
-      const url = URL.createObjectURL(blob);
-      const div = document.createElement("div");
-      div.className = "stem";
-      div.innerHTML = `<h4>${name}</h4><audio controls src="${url}"></audio>`;
-      stemsEl.appendChild(div);
+    for (const res of results) {
+      const group = document.createElement("div");
+      group.innerHTML = `<h3>Combine: ${res.label}</h3>`;
+      const grid = document.createElement("div");
+      grid.className = "grid";
+      for (const name of ["drums", "bass", "other", "vocals"]) {
+        const blob = toWavBlob(res.stems[name], meta.samplerate, meta.channels);
+        const url = URL.createObjectURL(blob);
+        const div = document.createElement("div");
+        div.className = "stem";
+        div.innerHTML = `<h4>${name}</h4><audio controls src="${url}"></audio>`;
+        grid.appendChild(div);
+      }
+      group.appendChild(grid);
+      stemsEl.appendChild(group);
     }
   } catch (e) {
     console.error(e);

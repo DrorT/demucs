@@ -67,8 +67,9 @@ class SimpleFFT {
 
 export function hannWindow(N: number): Float32Array {
   const w = new Float32Array(N);
+  // Match torch.hann_window default (periodic=True): denominator N
   for (let n = 0; n < N; n++) {
-    w[n] = 0.5 * (1 - Math.cos((2 * Math.PI * n) / (N - 1)));
+    w[n] = 0.5 * (1 - Math.cos((2 * Math.PI * n) / N));
   }
   return w;
 }

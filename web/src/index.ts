@@ -94,10 +94,18 @@ export class DemucsOnnx {
       onProgress?: (p: number) => void;
       segmentSeconds?: number;
       logPerf?: boolean;
+      debugDump?: boolean;
     }
   ): Promise<{
     results: Record<"sum" | "spec" | "time", Record<string, Float32Array>>;
     provider: string;
+    debug?: {
+      mag: Float32Array; // [1,C*2,F,T]
+      mix: Float32Array; // [1,C,L]
+      spec_out: Float32Array; // [1,S,C*2,F,T]
+      time_out: Float32Array; // [1,S,C,L]
+      shapes: any;
+    };
   }> {
     const { samplerate, channels, nfft, segment } = this.meta;
     const C = channels;
@@ -151,6 +159,16 @@ export class DemucsOnnx {
     let F = 0,
       TT = 0;
 
+    let dumped = false;
+    let debugData:
+      | {
+          mag: Float32Array;
+          mix: Float32Array;
+          spec_out: Float32Array;
+          time_out: Float32Array;
+          shapes: any;
+        }
+      | undefined;
     for (const off of offsets) {
       if (off >= maxT) break;
       const chunkStart = performance.now();
@@ -281,6 +299,22 @@ export class DemucsOnnx {
       }
       const tPost1 = performance.now();
 
+      if (!dumped && opts?.debugDump) {
+        dumped = true;
+        debugData = {
+          mag: new Float32Array(mag),
+          mix: new Float32Array(mixBuf),
+          spec_out: new Float32Array(specBuf),
+          time_out: new Float32Array(timeBuf),
+          shapes: {
+            mag: [1, C * 2, F, TT],
+            mix: [1, C, segLen],
+            spec_out: (specOut as any).dims,
+            time_out: (timeOut as any).dims,
+          },
+        };
+      }
+
       if (perfEnabled) {
         const preMs = tPre1 - tPre0;
         const inferMs = tInfer1 - tInfer0;
@@ -351,6 +385,7 @@ export class DemucsOnnx {
     return {
       results: { sum: stemsSum, spec: stemsSpec, time: stemsTime },
       provider,
+      debug: debugData,
     };
   }
 

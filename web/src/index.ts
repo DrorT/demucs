@@ -212,9 +212,22 @@ export class DemucsOnnx {
 
       // Post-processing
       const tPost0 = performance.now();
-      const [out0, out1] = this.session.outputNames;
-      const specOut = res[out0] as any;
-      const timeOut = res[out1] as any;
+      const names = this.session.outputNames as string[];
+      const a = res[names[0]] as any;
+      const b = res[names[1]] as any;
+      const pick = (ta: any, tb: any) => {
+        const da = ta.dims as number[];
+        const db = tb.dims as number[];
+        // spec_out: [B,S,C*2,F,T] (len=5), time_out: [B,S,C,T] (len=4)
+        if (da.length === 5 && db.length === 4) return { spec: ta, time: tb };
+        if (da.length === 4 && db.length === 5) return { spec: tb, time: ta };
+        // Fallback by checking C*2 dimension match
+        if (da.length >= 3 && da[2] === C * 2) return { spec: ta, time: tb };
+        if (db.length >= 3 && db[2] === C * 2) return { spec: tb, time: ta };
+        // As last resort assume original order
+        return { spec: ta, time: tb };
+      };
+      const { spec: specOut, time: timeOut } = pick(a, b);
       const specBuf = specOut.data as Float32Array; // [1,S,C*2,F,T]
       const timeBuf = timeOut.data as Float32Array; // [1,S,C,T]
       const B = 1,

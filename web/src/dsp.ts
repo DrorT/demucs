@@ -79,13 +79,37 @@ export function reflectPad1d(
   right: number
 ): Float32Array {
   const L = x.length;
-  const y = new Float32Array(left + L + right);
-  // left reflect: x[1], x[2], ..., x[left]
-  for (let i = 0; i < left; i++) y[i] = x[1 + i];
+  const maxPad = Math.max(left, right);
+  // Emulate Demucs pad1d reflect behavior on small input: if signal is too short
+  // compared to padding, insert extra zero padding before reflection so reflect
+  // indexing is valid and avoids clamping artifacts.
+  let xWork = x;
+  let leftPad = left;
+  let rightPad = right;
+  if (L <= maxPad) {
+    const extra = maxPad - L + 1;
+    const extraRight = Math.min(right, extra);
+    const extraLeft = extra - extraRight;
+    const x2 = new Float32Array(extraLeft + L + extraRight);
+    // leading zeros
+    // center
+    x2.set(x, extraLeft);
+    // trailing zeros implicitly present
+    xWork = x2;
+    leftPad = left - extraLeft;
+    rightPad = right - extraRight;
+  }
+  const LW = xWork.length;
+  const y = new Float32Array(leftPad + LW + rightPad);
+  // left reflect: farthest first -> x[left] ... x[2], x[1]
+  for (let i = 0; i < leftPad; i++) {
+    const src = 1 + i; // skip edge sample x[0]
+    y[leftPad - 1 - i] = xWork[src];
+  }
   // center
-  y.set(x, left);
+  y.set(xWork, leftPad);
   // right reflect: x[L-2], x[L-3], ..., x[L-right-1]
-  for (let i = 0; i < right; i++) y[left + L + i] = x[L - 2 - i];
+  for (let i = 0; i < rightPad; i++) y[leftPad + LW + i] = xWork[LW - 2 - i];
   return y;
 }
 
@@ -96,6 +120,7 @@ export function stft(
 ): { real: Float32Array[]; imag: Float32Array[] } {
   const win = hannWindow(nfft);
   const fft = new SimpleFFT(nfft);
+  const scale = 1 / Math.sqrt(nfft); // PyTorch stft(normalized=True)
   const frames: { real: Float32Array; imag: Float32Array }[] = [];
   for (let start = 0; start + nfft <= x.length; start += hop) {
     const buf = new Float32Array(nfft);
@@ -108,8 +133,8 @@ export function stft(
     const real = new Float32Array(nfft / 2 + 1);
     const imag = new Float32Array(nfft / 2 + 1);
     for (let k = 0; k <= nfft / 2; k++) {
-      real[k] = re[k];
-      imag[k] = im[k];
+      real[k] = re[k] * scale;
+      imag[k] = im[k] * scale;
     }
     frames.push({ real, imag });
   }
@@ -128,6 +153,7 @@ export function istft(
 ): Float32Array {
   const win = hannWindow(nfft);
   const fft = new SimpleFFT(nfft);
+  const invNorm = Math.sqrt(nfft); // compensate for stft normalized=True
   const out = new Float32Array(length);
   const norm = new Float32Array(length);
   for (let t = 0; t < realFrames.length; t++) {
@@ -137,12 +163,12 @@ export function istft(
     const re = new Float32Array(nfft);
     const im = new Float32Array(nfft);
     for (let k = 0; k <= nfft / 2; k++) {
-      re[k] = real[k];
-      im[k] = imag[k];
+      re[k] = real[k] * invNorm;
+      im[k] = imag[k] * invNorm;
     }
     for (let k = 1; k < nfft / 2; k++) {
-      re[nfft - k] = real[k];
-      im[nfft - k] = -imag[k];
+      re[nfft - k] = real[k] * invNorm;
+      im[nfft - k] = -imag[k] * invNorm;
     }
     fft.fft(re, im, true);
     const time = re;
@@ -236,11 +262,13 @@ export function packCAC(
   const F = real[0].length;
   const T = real.length;
   const out = new Float32Array(2 * F * T);
-  for (let t = 0; t < T; t++) {
-    for (let f = 0; f < F; f++) {
-      const idx = t * F + f;
-      out[2 * idx] = real[t][f];
-      out[2 * idx + 1] = imag[t][f];
+  const realBase = 0;
+  const imagBase = F * T;
+  // Match PyTorch pack: planes [2, F, T] with T contiguous, then reshape to [2*F, T]
+  for (let f = 0; f < F; f++) {
+    for (let t = 0; t < T; t++) {
+      out[realBase + f * T + t] = real[t][f];
+      out[imagBase + f * T + t] = imag[t][f];
     }
   }
   return out;
@@ -253,13 +281,16 @@ export function unpackCAC(
 ): { real: Float32Array[]; imag: Float32Array[] } {
   const real: Float32Array[] = new Array(T);
   const imag: Float32Array[] = new Array(T);
+  const realBase = 0;
+  const imagBase = F * T;
   for (let t = 0; t < T; t++) {
     real[t] = new Float32Array(F);
     imag[t] = new Float32Array(F);
-    for (let f = 0; f < F; f++) {
-      const idx = t * F + f;
-      real[t][f] = buf[2 * idx];
-      imag[t][f] = buf[2 * idx + 1];
+  }
+  for (let f = 0; f < F; f++) {
+    for (let t = 0; t < T; t++) {
+      real[t][f] = buf[realBase + f * T + t];
+      imag[t][f] = buf[imagBase + f * T + t];
     }
   }
   return { real, imag };

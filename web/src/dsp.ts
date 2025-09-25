@@ -235,35 +235,38 @@ export function iSpecLike(
   });
 
   // Helper to create a reflected frame for padding
-  const reflectFrame = (frames: Float32Array[], side: 'left' | 'right', index: number): Float32Array => {
+  const reflectFrame = (
+    frames: Float32Array[],
+    side: "left" | "right",
+    index: number
+  ): Float32Array => {
     // side: 'left' reflects from the start of frames, 'right' from the end
     // index: 0 for the first padding frame, 1 for the second
-    const sourceFrame = side === 'left' ? frames[index + 1] : frames[frames.length - 2 - index];
+    const sourceIndex = side === "left" ? index + 1 : frames.length - 2 - index;
+    const sourceFrame = frames[sourceIndex];
     if (!sourceFrame) {
-      // Fallback to zero frame if source is unavailable (should not happen with 2 pads)
+      // Fallback to zero frame if source is unavailable
       return new Float32Array(F1);
     }
-    const reflected = new Float32Array(F1);
-    for (let i = 0; i < F1; i++) {
-      reflected[i] = sourceFrame[F1 - 1 - i];
-    }
-    return reflected;
+    // For spectrograms, reflection in time is just taking the frame from the other side.
+    // No need to reverse frequency bins.
+    return sourceFrame;
   };
 
   // Insert back missing padding frames in time: 2 left, 2 right, using reflection
   const real = [
-    reflectFrame(realAdd, 'left', 1), // Reflect realAdd[1]
-    reflectFrame(realAdd, 'left', 0), // Reflect realAdd[0]
+    reflectFrame(realAdd, "left", 1), // Reflects frame at index 2 (realAdd[1])
+    reflectFrame(realAdd, "left", 0), // Reflects frame at index 1 (realAdd[0])
     ...realAdd,
-    reflectFrame(realAdd, 'right', 0), // Reflect realAdd[realAdd.length - 1]
-    reflectFrame(realAdd, 'right', 1), // Reflect realAdd[realAdd.length - 2]
+    reflectFrame(realAdd, "right", 0), // Reflects frame at index L-2 (realAdd[len-2])
+    reflectFrame(realAdd, "right", 1), // Reflects frame at index L-3 (realAdd[len-3])
   ];
   const imag = [
-    reflectFrame(imagAdd, 'left', 1), // Reflect imagAdd[1]
-    reflectFrame(imagAdd, 'left', 0), // Reflect imagAdd[0]
+    reflectFrame(imagAdd, "left", 1),
+    reflectFrame(imagAdd, "left", 0),
     ...imagAdd,
-    reflectFrame(imagAdd, 'right', 0), // Reflect imagAdd[imagAdd.length - 1]
-    reflectFrame(imagAdd, 'right', 1), // Reflect imagAdd[imagAdd.length - 2]
+    reflectFrame(imagAdd, "right", 0),
+    reflectFrame(imagAdd, "right", 1),
   ];
   // Reconstruct with n_fft = 2*F (since frames now have F+1 bins)
   const nfftRec = 2 * F;

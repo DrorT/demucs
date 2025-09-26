@@ -87,22 +87,9 @@ class BLSTM(tf.keras.layers.Layer):
         return outputs
 
     def _process_in_chunks(self, x: tf.Tensor, training: bool) -> tf.Tensor:
-        if self.max_steps is None:
-            return self._process_full_sequence(x, training)
-        width = self.max_steps
-        stride = width // 2
-        frames = tf.signal.frame(x, frame_length=width, frame_step=stride, axis=1)
-        batch = tf.shape(frames)[0]
-        num_frames = tf.shape(frames)[1]
-        frames = tf.reshape(frames, [batch * num_frames, width, self.units])
-        frames = self._run_rnn(frames, training=training)
-        frames = tf.reshape(frames, [batch, num_frames, width, self.units])
-        frames = tf.transpose(frames, perm=[0, 3, 1, 2])  # (B, C, frames, width)
-        frames = tf.reshape(frames, [batch * self.units, num_frames, width])
-        sequence = tf.signal.overlap_and_add(frames, frame_step=stride)
-        sequence = tf.reshape(sequence, [batch, self.units, -1])
-        sequence = tf.transpose(sequence, perm=[0, 2, 1])
-        return sequence
+        # Temporary fallback: process the whole sequence eagerly. The chunked path
+        # will be reinstated once the TF graph parity has been validated.
+        return self._process_full_sequence(x, training)
 
     def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:  # type: ignore[override]
         x = tf.transpose(inputs, perm=[0, 2, 1])  # (B, T, C)
@@ -120,6 +107,10 @@ class BLSTM(tf.keras.layers.Layer):
             outputs = self._process_full_sequence(x, training=training)
         outputs = outputs[:, :length, :]
         outputs = tf.transpose(outputs, perm=[0, 2, 1])
+        outputs = tf.cast(outputs, inputs.dtype)
+        from demucs_tf.utils import center_trim  # avoid circular import
+
+        outputs = center_trim(outputs, inputs)
         if self.skip:
             outputs = outputs + inputs
         return outputs

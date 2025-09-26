@@ -8,34 +8,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import tensorflow as tf
 
 from demucs_tf.blocks import DConv
-from demucs_tf.layers import GroupNorm, LayerScale
+from demucs_tf.layers import GroupNorm
 from demucs_tf.layers.conv import Conv1DWithPadding, ConvTranspose1D
 from demucs_tf.layers.recurrent import BLSTM
 from demucs_tf.utils import center_trim, pad1d, stft, istft, resample_frac
+from demucs_tf.models.common import ScaledEmbedding
+from demucs_tf.models.transformer import CrossTransformerEncoder
 
-
-class ScaledEmbedding(tf.keras.layers.Layer):
-    """Embedding layer with learnable scale, matching PyTorch implementation."""
-
-    def __init__(self, num_embeddings: int, embedding_dim: int, scale: float = 10.0, smooth: bool = False):
-        super().__init__()
-        self.num_embeddings = int(num_embeddings)
-        self.embedding_dim = int(embedding_dim)
-        self.scale = float(scale)
-        self.smooth = bool(smooth)
-        self.embedding = tf.keras.layers.Embedding(self.num_embeddings, self.embedding_dim)
-
-    def build(self, input_shape: tf.TensorShape):  # type: ignore[override]
-        super().build(input_shape)
-        if self.smooth:
-            weight = tf.cumsum(self.embedding.embeddings, axis=0)
-            denom = tf.range(1, self.num_embeddings + 1, dtype=weight.dtype)[:, None]
-            weight = weight / tf.sqrt(denom)
-            self.embedding.embeddings.assign(weight)
-        self.embedding.embeddings.assign(self.embedding.embeddings / self.scale)
-
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:  # type: ignore[override]
-        return self.embedding(inputs) * self.scale
 
 
 @dataclass
@@ -693,8 +672,33 @@ class HTDemucsTF(tf.keras.Model):
             self.channel_upsampler_t = None
             self.channel_downsampler_t = None
 
-        # TODO: implement cross transformer encoder
-        self.crosstransformer = None
+        if self.t_layers > 0:
+            self.crosstransformer = CrossTransformerEncoder(
+                dim=transformer_channels,
+                emb=self.t_emb,
+                hidden_scale=self.t_hidden_scale,
+                num_heads=self.t_heads,
+                num_layers=self.t_layers,
+                cross_first=self.t_cross_first,
+                dropout=self.t_dropout,
+                max_positions=self.t_max_positions,
+                norm_in=self.t_norm_in,
+                norm_in_group=self.t_norm_in_group,
+                group_norm=self.t_group_norm,
+                norm_first=self.t_norm_first,
+                norm_out=self.t_norm_out,
+                max_period=self.t_max_period,
+                layer_scale=self.t_layer_scale,
+                gelu=self.t_gelu,
+                sin_random_shift=self.t_sin_random_shift,
+                weight_pos_embed=self.t_weight_pos_embed,
+                cape_mean_normalize=self.t_cape_mean_normalize,
+                cape_augment=self.t_cape_augment,
+                cape_glob_loc_scale=self.t_cape_glob_loc_scale,
+            )
+            self._track_trackable(self.crosstransformer, name="crosstransformer")
+        else:
+            self.crosstransformer = None
         self.transformer_channels = transformer_channels
         self.freqs_out = freqs
 
@@ -811,7 +815,36 @@ class HTDemucsTF(tf.keras.Model):
             saved.append(x)
 
         if self.crosstransformer is not None:
-            raise NotImplementedError("Transformer branch not yet implemented in HTDemucsTF port")
+            freq_bins = tf.shape(x)[-2]
+            time_frames = tf.shape(x)[-1]
+            spec_channels = tf.shape(x)[1]
+            tokens = freq_bins * time_frames
+            if self.channel_upsampler is not None and self.channel_upsampler_t is not None:
+                x_flat = tf.reshape(x, tf.stack([batch, spec_channels, tokens]))
+                x_flat = self.channel_upsampler(x_flat)
+                x = tf.reshape(
+                    x_flat,
+                    tf.stack(
+                        [
+                            batch,
+                            tf.constant(self.bottom_channels, dtype=tf.int32),
+                            freq_bins,
+                            time_frames,
+                        ]
+                    ),
+                )
+                xt = self.channel_upsampler_t(xt)
+            x, xt = self.crosstransformer(x, xt, training=training)
+            if self.channel_downsampler is not None and self.channel_downsampler_t is not None:
+                x_flat = tf.reshape(
+                    x,
+                    tf.stack(
+                        [batch, tf.constant(self.bottom_channels, dtype=tf.int32), tokens]
+                    ),
+                )
+                x_flat = self.channel_downsampler(x_flat)
+                x = tf.reshape(x_flat, tf.stack([batch, spec_channels, freq_bins, time_frames]))
+                xt = self.channel_downsampler_t(xt)
 
         offset = self.depth - len(self.tdecoder_layers)
         for idx, decode in enumerate(self.decoder_layers):

@@ -47,16 +47,26 @@ class GroupNorm(tf.keras.layers.Layer):
         if self.gamma is None or self.beta is None:
             raise RuntimeError("Layer has not been built yet.")
         x = inputs
+        rank = len(x.shape)
+        if rank < 3:
+            raise ValueError("GroupNorm expects input with shape (B, C, ...)" )
+
         batch = tf.shape(x)[0]
         channels = tf.shape(x)[1]
-        length = tf.shape(x)[2]
+        trailing = tf.shape(x)[2:]
         group_channels = channels // self.groups
-        x = tf.reshape(x, [batch, self.groups, group_channels, length])
-        mean = tf.reduce_mean(x, axis=[2, 3], keepdims=True)
-        variance = tf.reduce_mean(tf.square(x - mean), axis=[2, 3], keepdims=True)
+        new_shape = tf.concat(
+            [[batch, self.groups, group_channels], trailing], axis=0
+        )
+        x = tf.reshape(x, new_shape)
+        axes = list(range(3, len(new_shape)))
+        mean = tf.reduce_mean(x, axis=axes, keepdims=True)
+        variance = tf.reduce_mean(tf.square(x - mean), axis=axes, keepdims=True)
         x = (x - mean) * tf.math.rsqrt(variance + self.epsilon)
-        x = tf.reshape(x, [batch, channels, length])
-        x = x * self.gamma[:, None] + self.beta[:, None]
+        x = tf.reshape(x, tf.concat([[batch, channels], trailing], axis=0))
+        gamma = tf.reshape(self.gamma, [channels, *([1] * (rank - 2))])
+        beta = tf.reshape(self.beta, [channels, *([1] * (rank - 2))])
+        x = x * gamma + beta
         return x
 
 

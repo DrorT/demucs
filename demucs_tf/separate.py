@@ -122,10 +122,10 @@ def build_model_from_checkpoint(
     config.update(overrides)
 
     if "sources" not in config:
-        raise KeyError(
-            "Checkpoint does not contain source information. "
-            "Provide a JSON override with a `sources` list."
+        LOGGER.warning(
+            "Checkpoint lacks `sources`; falling back to default Demucs stems"
         )
+        config["sources"] = ["drums", "bass", "other", "vocals"]
 
     kwargs = {key: config[key] for key in _EXPECTED_KEYS if key in config}
     sources = config["sources"]

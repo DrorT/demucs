@@ -38,8 +38,13 @@ def load_pytorch_state_dict(checkpoint: Path | str) -> Dict[str, torch.Tensor]:
 
     checkpoint = Path(checkpoint)
     obj = torch.load(checkpoint, map_location="cpu")
-    if isinstance(obj, Mapping) and "state_dict" in obj:
-        state = obj["state_dict"]
+    if isinstance(obj, Mapping):
+        if "state_dict" in obj:
+            state = obj["state_dict"]
+        elif "state" in obj:
+            state = obj["state"]
+        else:
+            state = obj
     else:
         state = obj
     result: Dict[str, torch.Tensor] = {}

@@ -37,4 +37,34 @@ def unfold(x: tf.Tensor, kernel_size: int, stride: int) -> tf.Tensor:
     return frames
 
 
-__all__ = ["center_trim", "unfold"]
+def resample_frac(x: tf.Tensor, old: int, new: int) -> tf.Tensor:
+    """Resample the waveform by a fractional ratio ``new / old``.
+
+    This mirrors :func:`julius.resample_frac` semantics used in the PyTorch codebase,
+    where ``old`` and ``new`` correspond to the original and target sample rates.
+    """
+
+    if old <= 0 or new <= 0:
+        raise ValueError("`old` and `new` must be positive integers.")
+    x_t = tf.transpose(x, perm=[0, 2, 1])  # (B, T, C)
+    resample_poly = getattr(tf.signal, "resample_poly", None)
+    if resample_poly is not None:
+        y = resample_poly(x_t, up=new, down=old, axis=1)
+    else:
+        length = tf.shape(x_t)[1]
+        target = tf.cast(
+            tf.math.round(tf.cast(length, tf.float32) * (new / old)),
+            tf.int32,
+        )
+        x_img = tf.expand_dims(x_t, axis=2)  # (B, T, 1, C)
+        y_img = tf.image.resize(
+            x_img,
+            size=[target, 1],
+            method="bilinear",
+            antialias=True,
+        )
+        y = tf.squeeze(y_img, axis=2)
+    return tf.transpose(y, perm=[0, 2, 1])
+
+
+__all__ = ["center_trim", "unfold", "resample_frac"]

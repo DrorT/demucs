@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import os
-from typing import List, Sequence
+from typing import List, Sequence, TYPE_CHECKING
 
 import tensorflow as tf
 
 from demucs_tf.blocks import DConv
 from demucs_tf.layers import BLSTM, Conv1DWithPadding, ConvTranspose1D, GroupNorm
 from demucs_tf.utils import center_trim, resample_frac
+
+if TYPE_CHECKING:  # pragma: no cover
+    from demucs_tf.checkpoints.loader import AssignmentReport
 
 
 class GELU(tf.keras.layers.Layer):
@@ -206,10 +209,10 @@ class DemucsTF(tf.keras.Model):
             else None
         )
 
-    def load_pytorch_checkpoint(self, checkpoint: str | os.PathLike[str]) -> None:
+    def load_pytorch_checkpoint(self, checkpoint: str | os.PathLike[str]) -> "AssignmentReport":
         from demucs_tf.checkpoints.loader import load_demucs_tf_weights
 
-        load_demucs_tf_weights(self, checkpoint)
+        return load_demucs_tf_weights(self, checkpoint)
 
     def valid_length(self, length: tf.Tensor) -> tf.Tensor:
         length = tf.cast(length, tf.int32)

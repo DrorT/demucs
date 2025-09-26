@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import tensorflow as tf
 
@@ -37,10 +37,7 @@ class BLSTM(tf.keras.layers.Layer):
         self.skip = bool(skip)
         self.dropout = float(dropout)
         self.recurrent_dropout = float(recurrent_dropout)
-        self.forward_cell: Optional[tf.keras.layers.StackedRNNCells] = None
-        self.backward_cell: Optional[tf.keras.layers.StackedRNNCells] = None
-        self.forward_layer: Optional[tf.keras.layers.RNN] = None
-        self.backward_layer: Optional[tf.keras.layers.RNN] = None
+        self.rnn_layers: List[tf.keras.layers.Bidirectional] = []
         self.proj: Optional[tf.keras.layers.Dense] = None
 
     def build(self, input_shape):  # type: ignore[override]
@@ -49,47 +46,39 @@ class BLSTM(tf.keras.layers.Layer):
             raise ValueError(
                 f"Input channel dimension ({dim}) must match `units` ({self.units})."
             )
-        forward_cells = [
-            tf.keras.layers.LSTMCell(
+        self.rnn_layers = []
+        for idx in range(self.layers):
+            forward_layer = tf.keras.layers.LSTM(
                 self.units,
+                return_sequences=True,
                 dropout=self.dropout,
                 recurrent_dropout=self.recurrent_dropout,
+                name=f"{self.name or 'blstm'}_forward_{idx}",
             )
-            for _ in range(self.layers)
-        ]
-        backward_cells = [
-            tf.keras.layers.LSTMCell(
+            backward_layer = tf.keras.layers.LSTM(
                 self.units,
+                return_sequences=True,
                 dropout=self.dropout,
                 recurrent_dropout=self.recurrent_dropout,
+                go_backwards=True,
+                name=f"{self.name or 'blstm'}_backward_{idx}",
             )
-            for _ in range(self.layers)
-        ]
-        self.forward_cell = tf.keras.layers.StackedRNNCells(forward_cells)
-        self.backward_cell = tf.keras.layers.StackedRNNCells(backward_cells)
-        self.forward_layer = tf.keras.layers.RNN(
-            self.forward_cell, return_sequences=True, name=f"{self.name or 'blstm'}_forward"
-        )
-        self.backward_layer = tf.keras.layers.RNN(
-            self.backward_cell,
-            return_sequences=True,
-            go_backwards=True,
-            name=f"{self.name or 'blstm'}_backward",
-        )
+            bidirectional = tf.keras.layers.Bidirectional(
+                forward_layer,
+                backward_layer=backward_layer,
+                merge_mode="concat",
+                name=f"{self.name or 'blstm'}_bidir_{idx}",
+            )
+            self.rnn_layers.append(bidirectional)
         self.proj = tf.keras.layers.Dense(self.units)
         super().build(input_shape)
 
     def _run_rnn(self, inputs: tf.Tensor, training: bool) -> tf.Tensor:
-        if (
-            self.forward_layer is None
-            or self.backward_layer is None
-            or self.proj is None
-        ):
+        if not self.rnn_layers or self.proj is None:
             raise RuntimeError("Layer has not been built yet.")
-        forward = self.forward_layer(inputs, training=training)
-        backward = self.backward_layer(inputs, training=training)
-        backward = tf.reverse(backward, axis=[1])
-        outputs = tf.concat([forward, backward], axis=-1)
+        outputs = inputs
+        for bidir in self.rnn_layers:
+            outputs = bidir(outputs, training=training)
         outputs = self.proj(outputs)
         return outputs
 

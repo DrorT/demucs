@@ -1,11 +1,13 @@
 # Demucs PyTorch → TensorFlow Migration Plan
 
 ## Goals
+
 - Rebuild the Demucs separator in pure TensorFlow/Keras while matching the PyTorch reference implementation bit-for-bit.
 - Load weights from existing PyTorch checkpoints and assign them to the TensorFlow model.
 - Validate output parity on representative audio mixtures and package the TensorFlow graph for downstream consumers (SavedModel, TFLite, ONNX).
 
 ## Proposed TensorFlow Package Layout
+
 ```
 demucs_tf/
   __init__.py
@@ -37,6 +39,7 @@ demucs_tf/
 ```
 
 ## Migration Workstream
+
 1. **Scaffold package**: add the `demucs_tf/` tree with placeholder modules and minimal imports.
 2. **Implement layers**: translate Conv/ConvTranspose wrappers, GroupNorm, LayerScale, and shared utilities.
 3. **Port residual blocks**: replicate `DConv`, `LocalState`, and BLSTM chunking behaviour.
@@ -47,16 +50,19 @@ demucs_tf/
 8. **Automation**: integrate validation into CI and document usage in README/docs.
 
 ## Environment & Tooling
+
 - Use the project virtualenv: `source pydemucs/bin/activate`.
 - TensorFlow version target: 2.15+ (confirm compatibility with tf.lite & tf2onnx).
 - TensorFlow Addons optional; include fallback implementations where needed.
 
 ## Open Questions
+
 - Do we support both classic Demucs and Hybrid (spectrogram) variants in phase 1?
 - How closely must we mirror PyTorch numerical parity (exact float match vs tolerances)?
 - Should resampling reuse Julius polyphase filters or leverage TF signal processing APIs?
 
 ## Milestones
+
 - **M1 – Skeleton Ready**: Package layout committed, placeholder modules pass import checks.
 - **M2 – Functional Model**: TF Demucs runs inference with random weights.
 - **M3 – Weight Parity**: PyTorch checkpoint successfully transferred; parity tests below tolerance.

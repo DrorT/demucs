@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import List, Sequence
 
 import tensorflow as tf
@@ -80,12 +81,23 @@ class DemucsTF(tf.keras.Model):
         self.context = int(context)
         self.stride = int(stride)
         self.depth = int(depth)
+        self.growth = float(growth)
+        self.rewrite = bool(rewrite)
+        self.lstm_layers = int(lstm_layers)
         self.resample = bool(resample)
         self.channels = int(channels)
         self.normalize = bool(normalize)
         self.samplerate = int(samplerate)
         self.segment = float(segment)
-        self.rewrite = bool(rewrite)
+        self.gelu = bool(gelu)
+        self.glu = bool(glu)
+        self.norm_starts = int(norm_starts)
+        self.norm_groups = int(norm_groups)
+        self.dconv_depth = int(dconv_depth)
+        self.dconv_comp = float(dconv_comp)
+        self.dconv_attn = int(dconv_attn)
+        self.dconv_lstm = int(dconv_lstm)
+        self.dconv_init = float(dconv_init)
         self.dconv_mode = int(dconv_mode)
         self.num_sources = len(self.sources)
 
@@ -193,6 +205,11 @@ class DemucsTF(tf.keras.Model):
             if lstm_layers > 0
             else None
         )
+
+    def load_pytorch_checkpoint(self, checkpoint: str | os.PathLike[str]) -> None:
+        from demucs_tf.checkpoints.loader import load_demucs_tf_weights
+
+        load_demucs_tf_weights(self, checkpoint)
 
     def valid_length(self, length: tf.Tensor) -> tf.Tensor:
         length = tf.cast(length, tf.int32)

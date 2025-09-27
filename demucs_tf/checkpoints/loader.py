@@ -16,6 +16,7 @@ from demucs_tf.layers.attention import LocalState
 from demucs_tf.layers.conv import Conv1DWithPadding, ConvTranspose1D
 from demucs_tf.layers.norm import GroupNorm, LayerScale
 from demucs_tf.layers.recurrent import BLSTM
+from demucs_tf.models.transformer import ChannelLastGroupNorm, LayerScale1D, MultiHeadAttention
 
 if TYPE_CHECKING:  # pragma: no cover
     from demucs_tf.models.demucs import DemucsTF
@@ -92,6 +93,22 @@ def pytorch_to_tf_conv_transpose1d(weight: torch.Tensor) -> np.ndarray:
     return pytorch_to_numpy(weight).transpose(2, 1, 0)
 
 
+def pytorch_to_tf_conv2d(weight: torch.Tensor) -> np.ndarray:
+    """Convert a PyTorch ``nn.Conv2d`` kernel to TensorFlow format."""
+
+    # PyTorch: (out_channels, in_channels, kernel_h, kernel_w)
+    # TensorFlow: (kernel_h, kernel_w, in_channels, out_channels)
+    return pytorch_to_numpy(weight).transpose(2, 3, 1, 0)
+
+
+def pytorch_to_tf_conv_transpose2d(weight: torch.Tensor) -> np.ndarray:
+    """Convert a PyTorch ``nn.ConvTranspose2d`` kernel to TensorFlow format."""
+
+    # PyTorch: (in_channels, out_channels, kernel_h, kernel_w)
+    # TensorFlow: (kernel_h, kernel_w, out_channels, in_channels)
+    return pytorch_to_numpy(weight).transpose(2, 3, 1, 0)
+
+
 def pytorch_to_tf_dense(weight: torch.Tensor) -> np.ndarray:
     """Convert a PyTorch ``nn.Linear`` kernel to Keras dense format."""
 
@@ -148,6 +165,42 @@ def assign_conv_transpose1d_weights(
         example_shape = [1, weight.shape[0], 4]
     ensure_layer_built(layer, example_shape)
     kernel = pytorch_to_tf_conv_transpose1d(weight)
+    layer.kernel.assign(kernel)
+    if layer.use_bias and bias is not None and layer.bias is not None:
+        layer.bias.assign(pytorch_to_numpy(bias))
+
+
+def assign_conv2d_weights(
+    layer: tf.keras.layers.Conv2D,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    example_shape: Optional[Sequence[int]] = None,
+) -> None:
+    """Assign PyTorch Conv2d weights to a :class:`tf.keras.layers.Conv2D`."""
+
+    if example_shape is None:
+        example_shape = [1, weight.shape[1], weight.shape[2], weight.shape[3]]
+    ensure_layer_built(layer, example_shape)
+    kernel = pytorch_to_tf_conv2d(weight)
+    layer.kernel.assign(kernel)
+    if layer.use_bias and bias is not None and layer.bias is not None:
+        layer.bias.assign(pytorch_to_numpy(bias))
+
+
+def assign_conv_transpose2d_weights(
+    layer: tf.keras.layers.Conv2DTranspose,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    example_shape: Optional[Sequence[int]] = None,
+) -> None:
+    """Assign PyTorch ConvTranspose2d weights to :class:`tf.keras.layers.Conv2DTranspose`."""
+
+    if example_shape is None:
+        height = max(int(weight.shape[2]), 1)
+        width = max(int(weight.shape[3]), 1)
+        example_shape = [1, weight.shape[0], height, width]
+    ensure_layer_built(layer, example_shape)
+    kernel = pytorch_to_tf_conv_transpose2d(weight)
     layer.kernel.assign(kernel)
     if layer.use_bias and bias is not None and layer.bias is not None:
         layer.bias.assign(pytorch_to_numpy(bias))
@@ -459,6 +512,30 @@ def load_demucs_tf_weights(model: "DemucsTF", checkpoint: Path | str) -> Assignm
         record(weight_key, layer.name or layer.__class__.__name__)
         record(bias_key, layer.name or layer.__class__.__name__)
 
+    def assign_conv2d_layer(layer: tf.keras.layers.Conv2D, prefix: str) -> None:
+        weight_key = f"{prefix}.weight"
+        bias_key = f"{prefix}.bias"
+        weight = consume(weight_key)
+        bias = consume(bias_key)
+        if weight is None:
+            return
+        assign_conv2d_weights(layer, weight, bias)
+        record(weight_key, layer.name or layer.__class__.__name__)
+        if bias is not None:
+            record(bias_key, layer.name or layer.__class__.__name__)
+
+    def assign_conv_transpose2d_layer(layer: tf.keras.layers.Conv2DTranspose, prefix: str) -> None:
+        weight_key = f"{prefix}.weight"
+        bias_key = f"{prefix}.bias"
+        weight = consume(weight_key)
+        bias = consume(bias_key)
+        if weight is None:
+            return
+        assign_conv_transpose2d_weights(layer, weight, bias)
+        record(weight_key, layer.name or layer.__class__.__name__)
+        if bias is not None:
+            record(bias_key, layer.name or layer.__class__.__name__)
+
     def assign_group_norm_layer(layer: GroupNorm, prefix: str) -> None:
         weight_key = f"{prefix}.weight"
         bias_key = f"{prefix}.bias"
@@ -525,6 +602,136 @@ def load_demucs_tf_weights(model: "DemucsTF", checkpoint: Path | str) -> Assignm
 
             assign_layerscale(block.scale, f"{block_prefix}.{scale_index}.scale")
 
+    def assign_layer_norm_layer(
+        layer: tf.keras.layers.Layer,
+        prefix: str,
+        example_length: int = 4,
+    ) -> None:
+        weight_key = f"{prefix}.weight"
+        bias_key = f"{prefix}.bias"
+        weight = consume(weight_key)
+        bias = consume(bias_key)
+        if weight is None or bias is None:
+            return
+        channels = weight.shape[0]
+        example_shape = [1, example_length, channels]
+        if isinstance(layer, ChannelLastGroupNorm):
+            ensure_layer_built(layer, example_shape)
+            layer.gamma.assign(pytorch_to_numpy(weight))
+            layer.beta.assign(pytorch_to_numpy(bias))
+        elif isinstance(layer, GroupNorm):
+            assign_group_norm(layer, weight, bias, example_shape)
+        elif isinstance(layer, tf.keras.layers.LayerNormalization):
+            ensure_layer_built(layer, example_shape)
+            layer.gamma.assign(pytorch_to_numpy(weight))
+            layer.beta.assign(pytorch_to_numpy(bias))
+        else:
+            return
+        record(weight_key, layer.name or layer.__class__.__name__)
+        record(bias_key, layer.name or layer.__class__.__name__)
+
+    def assign_layerscale1d(layer: LayerScale1D, key: str) -> None:
+        scale = consume(key)
+        if scale is None:
+            return
+        channels = scale.shape[0]
+        example_shape = [1, 4, channels]
+        ensure_layer_built(layer, example_shape)
+        layer.scale.assign(pytorch_to_numpy(scale))
+        record(key, layer.name or layer.__class__.__name__)
+
+    def assign_multi_head_attention_layer(
+        layer: MultiHeadAttention,
+        prefix: str,
+        example_length: int = 4,
+    ) -> None:
+        weight_key = f"{prefix}.in_proj_weight"
+        bias_key = f"{prefix}.in_proj_bias"
+        out_weight_key = f"{prefix}.out_proj.weight"
+        out_bias_key = f"{prefix}.out_proj.bias"
+        in_proj_weight = consume(weight_key)
+        in_proj_bias = consume(bias_key)
+        out_weight = consume(out_weight_key)
+        out_bias = consume(out_bias_key)
+        if in_proj_weight is None or in_proj_bias is None or out_weight is None or out_bias is None:
+            return
+        embed_dim = in_proj_weight.shape[1]
+        example_shape = [1, example_length, embed_dim]
+        if not layer.built:
+            dummy = tf.zeros(example_shape, dtype=tf.float32)
+            layer(dummy, dummy, dummy)
+        w_q, w_k, w_v = torch.chunk(in_proj_weight, 3, dim=0)
+        b_q, b_k, b_v = torch.chunk(in_proj_bias, 3, dim=0)
+        assign_dense_weights(layer.q_proj, w_q, b_q, example_shape=[1, embed_dim])
+        assign_dense_weights(layer.k_proj, w_k, b_k, example_shape=[1, embed_dim])
+        assign_dense_weights(layer.v_proj, w_v, b_v, example_shape=[1, embed_dim])
+        assign_dense_weights(layer.out_proj, out_weight, out_bias, example_shape=[1, embed_dim])
+        record(weight_key, layer.name or f"{layer.__class__.__name__}_qkv")
+        record(bias_key, layer.name or f"{layer.__class__.__name__}_qkv")
+        record(out_weight_key, layer.out_proj.name or f"{layer.__class__.__name__}_out")
+        record(out_bias_key, layer.out_proj.name or f"{layer.__class__.__name__}_out")
+
+    def assign_transformer_block(layer: tf.keras.layers.Layer, prefix: str) -> None:
+        if hasattr(layer, "attn"):
+            assign_multi_head_attention_layer(layer.attn, f"{prefix}.self_attn")
+        if hasattr(layer, "cross_attn"):
+            assign_multi_head_attention_layer(layer.cross_attn, f"{prefix}.cross_attn")
+
+        linear1_key = f"{prefix}.linear1.weight"
+        linear1_bias_key = f"{prefix}.linear1.bias"
+        linear2_key = f"{prefix}.linear2.weight"
+        linear2_bias_key = f"{prefix}.linear2.bias"
+        weight1 = consume(linear1_key)
+        bias1 = consume(linear1_bias_key)
+        weight2 = consume(linear2_key)
+        bias2 = consume(linear2_bias_key)
+        if weight1 is not None and bias1 is not None:
+            assign_dense_weights(layer.linear1, weight1, bias1)
+            record(linear1_key, layer.linear1.name or f"{layer.__class__.__name__}_ff1")
+            record(linear1_bias_key, layer.linear1.name or f"{layer.__class__.__name__}_ff1")
+        if weight2 is not None and bias2 is not None:
+            assign_dense_weights(layer.linear2, weight2, bias2)
+            record(linear2_key, layer.linear2.name or f"{layer.__class__.__name__}_ff2")
+            record(linear2_bias_key, layer.linear2.name or f"{layer.__class__.__name__}_ff2")
+
+        for norm_name in ("norm1", "norm2", "norm3", "norm_out"):
+            norm_layer = getattr(layer, norm_name, None)
+            if norm_layer is not None:
+                assign_layer_norm_layer(norm_layer, f"{prefix}.{norm_name}")
+
+        for gamma_name in ("gamma_1", "gamma_2"):
+            gamma_layer = getattr(layer, gamma_name, None)
+            if isinstance(gamma_layer, LayerScale1D):
+                assign_layerscale1d(gamma_layer, f"{prefix}.{gamma_name}.scale")
+
+    def assign_cross_transformer(transformer, prefix: str = "crosstransformer") -> None:
+        if transformer is None:
+            return
+
+        if getattr(transformer, "position_embeddings", None) is not None:
+            weight_key = f"{prefix}.position_embeddings.embedding.weight"
+            weight = consume(weight_key, required=False)
+            if weight is not None:
+                layer = transformer.position_embeddings
+                if not layer.built:
+                    layer(tf.zeros([1, 1], dtype=tf.int32))
+                layer.embedding.embeddings.assign(pytorch_to_numpy(weight))
+                record(weight_key, layer.name or f"{prefix}_position_embeddings")
+
+        norm_pairs = [
+            (transformer.norm_in, f"{prefix}.norm_in"),
+            (transformer.norm_in_t, f"{prefix}.norm_in_t"),
+        ]
+        for norm_layer, norm_prefix in norm_pairs:
+            if norm_layer is not None:
+                assign_layer_norm_layer(norm_layer, norm_prefix)
+
+        for idx, layer in enumerate(getattr(transformer, "layers_spec", [])):
+            assign_transformer_block(layer, f"{prefix}.layers.{idx}")
+
+        for idx, layer in enumerate(getattr(transformer, "layers_time", [])):
+            assign_transformer_block(layer, f"{prefix}.layers_t.{idx}")
+
     # Encoder layers -----------------------------------------------------------------
     for idx, encoder in enumerate(model.encoder_layers):
         prefix = f"encoder.{idx}"
@@ -546,24 +753,32 @@ def load_demucs_tf_weights(model: "DemucsTF", checkpoint: Path | str) -> Assignm
             rewrite_conv_idx = next_index
             rewrite_norm_idx = next_index + 1
 
-        conv_layers = [layer for layer in encoder.layers if isinstance(layer, Conv1DWithPadding)]
-        gn_layers = [layer for layer in encoder.layers if isinstance(layer, GroupNorm)]
-        dconv_layers = [layer for layer in encoder.layers if isinstance(layer, DConv)]
+        conv_layer = getattr(encoder, "conv", None)
+        if isinstance(conv_layer, Conv1DWithPadding):
+            assign_conv(conv_layer, f"{prefix}.{conv_idx}")
+        elif isinstance(conv_layer, tf.keras.layers.Conv2D):
+            assign_conv2d_layer(conv_layer, f"{prefix}.{conv_idx}")
 
-        if conv_layers:
-            assign_conv(conv_layers[0], f"{prefix}.{conv_idx}")
+        norm1 = getattr(encoder, "norm1", None)
+        if isinstance(norm1, GroupNorm):
+            assign_group_norm_layer(norm1, f"{prefix}.{norm_idx}")
 
-        if gn_layers:
-            assign_group_norm_layer(gn_layers[0], f"{prefix}.{norm_idx}")
+        if dconv_idx is not None:
+            dconv_layer = getattr(encoder, "dconv", None)
+            if isinstance(dconv_layer, DConv):
+                assign_dconv(dconv_layer, f"{prefix}.{dconv_idx}")
 
-        if dconv_idx is not None and dconv_layers:
-            assign_dconv(dconv_layers[0], f"{prefix}.{dconv_idx}")
+        if has_rewrite:
+            rewrite_layer = getattr(encoder, "rewrite", None)
+            if isinstance(rewrite_layer, Conv1DWithPadding):
+                assign_conv(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
+            elif isinstance(rewrite_layer, tf.keras.layers.Conv2D):
+                assign_conv2d_layer(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
 
-        if has_rewrite and len(conv_layers) > 1:
-            assign_conv(conv_layers[1], f"{prefix}.{rewrite_conv_idx}")
-
-        if has_rewrite and len(gn_layers) > 1 and rewrite_norm_idx is not None:
-            assign_group_norm_layer(gn_layers[1], f"{prefix}.{rewrite_norm_idx}")
+            if rewrite_norm_idx is not None:
+                norm2 = getattr(encoder, "norm2", None)
+                if isinstance(norm2, GroupNorm):
+                    assign_group_norm_layer(norm2, f"{prefix}.{rewrite_norm_idx}")
 
     # Decoder layers -----------------------------------------------------------------
     for idx, decoder in enumerate(model.decoder_layers):
@@ -589,26 +804,32 @@ def load_demucs_tf_weights(model: "DemucsTF", checkpoint: Path | str) -> Assignm
 
         post_norm_idx = position if needs_post else None
 
-        conv_layers = [layer for layer in decoder.layers if isinstance(layer, Conv1DWithPadding)]
-        gn_layers = [layer for layer in decoder.layers if isinstance(layer, GroupNorm)]
-        dconv_layers = [layer for layer in decoder.layers if isinstance(layer, DConv)]
-        conv_t_layers = [layer for layer in decoder.layers if isinstance(layer, ConvTranspose1D)]
+        if has_rewrite:
+            rewrite_layer = getattr(decoder, "rewrite", None)
+            if isinstance(rewrite_layer, Conv1DWithPadding):
+                assign_conv(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
+            elif isinstance(rewrite_layer, tf.keras.layers.Conv2D):
+                assign_conv2d_layer(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
 
-        if has_rewrite and conv_layers:
-            assign_conv(conv_layers[0], f"{prefix}.{rewrite_conv_idx}")
+            norm1 = getattr(decoder, "norm1", None)
+            if isinstance(norm1, GroupNorm):
+                assign_group_norm_layer(norm1, f"{prefix}.{rewrite_norm_idx}")
 
-        if has_rewrite and gn_layers:
-            assign_group_norm_layer(gn_layers[0], f"{prefix}.{rewrite_norm_idx}")
+        if dconv_idx is not None:
+            dconv_layer = getattr(decoder, "dconv", None)
+            if isinstance(dconv_layer, DConv):
+                assign_dconv(dconv_layer, f"{prefix}.{dconv_idx}")
 
-        if dconv_idx is not None and dconv_layers:
-            assign_dconv(dconv_layers[0], f"{prefix}.{dconv_idx}")
+        conv_transpose_layer = getattr(decoder, "conv_transpose", None)
+        if isinstance(conv_transpose_layer, ConvTranspose1D):
+            assign_conv_transpose(conv_transpose_layer, f"{prefix}.{conv_transpose_idx}")
+        elif isinstance(conv_transpose_layer, tf.keras.layers.Conv2DTranspose):
+            assign_conv_transpose2d_layer(conv_transpose_layer, f"{prefix}.{conv_transpose_idx}")
 
-        if conv_t_layers:
-            assign_conv_transpose(conv_t_layers[0], f"{prefix}.{conv_transpose_idx}")
-
-        if post_norm_idx is not None and len(gn_layers) > (1 if has_rewrite else 0):
-            gn_layer = gn_layers[1] if has_rewrite else gn_layers[0]
-            assign_group_norm_layer(gn_layer, f"{prefix}.{post_norm_idx}")
+        if post_norm_idx is not None:
+            norm2 = getattr(decoder, "norm2", None)
+            if isinstance(norm2, GroupNorm):
+                assign_group_norm_layer(norm2, f"{prefix}.{post_norm_idx}")
 
     # Bottleneck BLSTM ---------------------------------------------------------------
     if model.lstm is not None:
@@ -617,6 +838,28 @@ def load_demucs_tf_weights(model: "DemucsTF", checkpoint: Path | str) -> Assignm
         for key, target in report.assigned.items():
             unused.discard(key)
             record(key, target)
+
+    if getattr(model, "channel_upsampler", None) is not None:
+        assign_conv(model.channel_upsampler, "channel_upsampler")
+    if getattr(model, "channel_downsampler", None) is not None:
+        assign_conv(model.channel_downsampler, "channel_downsampler")
+    if getattr(model, "channel_upsampler_t", None) is not None:
+        assign_conv(model.channel_upsampler_t, "channel_upsampler_t")
+    if getattr(model, "channel_downsampler_t", None) is not None:
+        assign_conv(model.channel_downsampler_t, "channel_downsampler_t")
+
+    if getattr(model, "freq_emb", None) is not None:
+        weight_key = "freq_emb.embedding.weight"
+        weight = consume(weight_key, required=False)
+        if weight is not None:
+            freq_emb_layer = model.freq_emb
+            if not freq_emb_layer.built:
+                freq_emb_layer(tf.zeros([1, 1], dtype=tf.int32))
+            freq_emb_layer.embedding.embeddings.assign(pytorch_to_numpy(weight))
+            record(weight_key, freq_emb_layer.name or "freq_emb")
+
+    if getattr(model, "crosstransformer", None) is not None:
+        assign_cross_transformer(model.crosstransformer)
 
     return AssignmentReport(
         assigned=assigned,
@@ -629,9 +872,13 @@ __all__ = [
     "load_pytorch_state_dict",
     "pytorch_to_tf_conv1d",
     "pytorch_to_tf_conv_transpose1d",
+    "pytorch_to_tf_conv2d",
+    "pytorch_to_tf_conv_transpose2d",
     "pytorch_to_tf_dense",
     "assign_conv1d_weights",
     "assign_conv_transpose1d_weights",
+    "assign_conv2d_weights",
+    "assign_conv_transpose2d_weights",
     "assign_dense_weights",
     "assign_group_norm",
     "assign_layer_scale",

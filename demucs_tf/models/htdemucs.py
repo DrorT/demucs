@@ -355,6 +355,7 @@ class HTDemucsTF(tf.keras.Model):
         multi_freqs_depth: int = 3,
         freq_emb: float = 0.2,
         emb_scale: float = 10.0,
+    emb_boost: float = 3.0,
         emb_smooth: bool = True,
         kernel_size: int = 8,
         stride: int = 4,
@@ -423,6 +424,7 @@ class HTDemucsTF(tf.keras.Model):
         self.multi_freqs_depth = int(multi_freqs_depth)
         self.freq_emb_weight = float(freq_emb)
         self.emb_scale = float(emb_scale)
+        self.emb_boost = float(emb_boost)
         self.emb_smooth = bool(emb_smooth)
         self.kernel_size = int(kernel_size)
         self.stride = int(stride)
@@ -481,6 +483,7 @@ class HTDemucsTF(tf.keras.Model):
         self.tdecoder_layers: List[tf.keras.layers.Layer] = []
         self.freq_emb: Optional[ScaledEmbedding] = None
         self.freq_emb_scale: float = 0.0
+        self.lstm: Optional[BLSTM] = None
 
         dconv_kwargs = {
             "depth": self.dconv_depth,
@@ -634,6 +637,7 @@ class HTDemucsTF(tf.keras.Model):
                     num_embeddings=freqs,
                     embedding_dim=chin_freq,
                     scale=self.emb_scale,
+                    boost=self.emb_boost,
                     smooth=self.emb_smooth,
                 )
                 self.freq_emb_scale = self.freq_emb_weight

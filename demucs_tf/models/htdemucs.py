@@ -91,7 +91,7 @@ class HEncLayer(tf.keras.layers.Layer):
 
         if settings.rewrite:
             if self.freq:
-                kernel_rewrite = (1 + 2 * settings.context, 1)
+                kernel_rewrite = (1 + 2 * settings.context, 1 + 2 * settings.context)
                 self.rewrite = tf.keras.layers.Conv2D(
                     filters=2 * self.chout,
                     kernel_size=kernel_rewrite,
@@ -114,10 +114,11 @@ class HEncLayer(tf.keras.layers.Layer):
             self.norm2 = None
 
         if settings.use_dconv:
+            dconv_kwargs = dict(self.dconv_kwargs)
+            dconv_kwargs.setdefault("norm", True)
             self.dconv = DConv(
                 channels=self.chout,
-                norm=settings.use_norm,
-                **self.dconv_kwargs,
+                **dconv_kwargs,
             )
         else:
             self.dconv = None
@@ -238,7 +239,7 @@ class HDecLayer(tf.keras.layers.Layer):
             if settings.rewrite:
                 if self.freq:
                     if self.context_freq:
-                        kernel_rewrite = (1 + 2 * settings.context, 1)
+                        kernel_rewrite = (1 + 2 * settings.context, 1 + 2 * settings.context)
                     else:
                         kernel_rewrite = (1, 1 + 2 * settings.context)
                     self.rewrite = tf.keras.layers.Conv2D(
@@ -263,10 +264,11 @@ class HDecLayer(tf.keras.layers.Layer):
                 self.norm1 = None
 
             if settings.use_dconv:
+                dconv_kwargs = dict(self.dconv_kwargs)
+                dconv_kwargs.setdefault("norm", True)
                 self.dconv = DConv(
                     channels=self.chin,
-                    norm=settings.use_norm,
-                    **self.dconv_kwargs,
+                    **dconv_kwargs,
                 )
             else:
                 self.dconv = None

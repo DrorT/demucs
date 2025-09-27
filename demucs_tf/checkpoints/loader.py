@@ -179,8 +179,9 @@ def assign_conv2d_weights(
     """Assign PyTorch Conv2d weights to a :class:`tf.keras.layers.Conv2D`."""
 
     if example_shape is None:
-        example_shape = [1, weight.shape[1], weight.shape[2], weight.shape[3]]
-    ensure_layer_built(layer, example_shape)
+        example_shape = [None, weight.shape[1], weight.shape[2], weight.shape[3]]
+    if not layer.built:
+        layer.build(example_shape)
     kernel = pytorch_to_tf_conv2d(weight)
     layer.kernel.assign(kernel)
     if layer.use_bias and bias is not None and layer.bias is not None:
@@ -198,8 +199,9 @@ def assign_conv_transpose2d_weights(
     if example_shape is None:
         height = max(int(weight.shape[2]), 1)
         width = max(int(weight.shape[3]), 1)
-        example_shape = [1, weight.shape[0], height, width]
-    ensure_layer_built(layer, example_shape)
+        example_shape = [None, weight.shape[0], height, width]
+    if not layer.built:
+        layer.build(example_shape)
     kernel = pytorch_to_tf_conv_transpose2d(weight)
     layer.kernel.assign(kernel)
     if layer.use_bias and bias is not None and layer.bias is not None:
@@ -732,104 +734,69 @@ def load_demucs_tf_weights(model: "DemucsTF", checkpoint: Path | str) -> Assignm
         for idx, layer in enumerate(getattr(transformer, "layers_time", [])):
             assign_transformer_block(layer, f"{prefix}.layers_t.{idx}")
 
-    # Encoder layers -----------------------------------------------------------------
-    for idx, encoder in enumerate(model.encoder_layers):
-        prefix = f"encoder.{idx}"
-        has_dconv = bool(model.dconv_mode & 1)
-        has_rewrite = model.rewrite
+    def assign_encoder_branch(layers: Sequence[tf.keras.layers.Layer], prefix_root: str) -> None:
+        for idx, layer in enumerate(layers):
+            prefix = f"{prefix_root}.{idx}"
+            conv_layer = getattr(layer, "conv", None)
+            if isinstance(conv_layer, Conv1DWithPadding):
+                assign_conv(conv_layer, f"{prefix}.conv")
+            elif isinstance(conv_layer, tf.keras.layers.Conv2D):
+                assign_conv2d_layer(conv_layer, f"{prefix}.conv")
 
-        conv_idx = 0
-        norm_idx = 1
-        dconv_idx = 3 if has_dconv else None
-        rewrite_conv_idx = None
-        rewrite_norm_idx = None
-
-        if has_dconv:
-            next_index = 4
-        else:
-            next_index = 3
-
-        if has_rewrite:
-            rewrite_conv_idx = next_index
-            rewrite_norm_idx = next_index + 1
-
-        conv_layer = getattr(encoder, "conv", None)
-        if isinstance(conv_layer, Conv1DWithPadding):
-            assign_conv(conv_layer, f"{prefix}.{conv_idx}")
-        elif isinstance(conv_layer, tf.keras.layers.Conv2D):
-            assign_conv2d_layer(conv_layer, f"{prefix}.{conv_idx}")
-
-        norm1 = getattr(encoder, "norm1", None)
-        if isinstance(norm1, GroupNorm):
-            assign_group_norm_layer(norm1, f"{prefix}.{norm_idx}")
-
-        if dconv_idx is not None:
-            dconv_layer = getattr(encoder, "dconv", None)
-            if isinstance(dconv_layer, DConv):
-                assign_dconv(dconv_layer, f"{prefix}.{dconv_idx}")
-
-        if has_rewrite:
-            rewrite_layer = getattr(encoder, "rewrite", None)
+            rewrite_layer = getattr(layer, "rewrite", None)
             if isinstance(rewrite_layer, Conv1DWithPadding):
-                assign_conv(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
+                assign_conv(rewrite_layer, f"{prefix}.rewrite")
             elif isinstance(rewrite_layer, tf.keras.layers.Conv2D):
-                assign_conv2d_layer(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
+                assign_conv2d_layer(rewrite_layer, f"{prefix}.rewrite")
 
-            if rewrite_norm_idx is not None:
-                norm2 = getattr(encoder, "norm2", None)
-                if isinstance(norm2, GroupNorm):
-                    assign_group_norm_layer(norm2, f"{prefix}.{rewrite_norm_idx}")
+            norm1 = getattr(layer, "norm1", None)
+            norm1_prefix = f"{prefix}.norm1"
+            if isinstance(norm1, GroupNorm) and norm1_prefix in state:
+                assign_group_norm_layer(norm1, norm1_prefix)
 
-    # Decoder layers -----------------------------------------------------------------
-    for idx, decoder in enumerate(model.decoder_layers):
-        prefix = f"decoder.{idx}"
-        has_rewrite = model.rewrite
-        has_dconv = bool(model.dconv_mode & 2)
-        needs_post = idx < len(model.decoder_layers) - 1
+            norm2 = getattr(layer, "norm2", None)
+            norm2_prefix = f"{prefix}.norm2"
+            if isinstance(norm2, GroupNorm) and norm2_prefix in state:
+                assign_group_norm_layer(norm2, norm2_prefix)
 
-        position = 0
-        rewrite_conv_idx = None
-        rewrite_norm_idx = None
-        if has_rewrite:
-            rewrite_conv_idx = position
-            rewrite_norm_idx = position + 1
-            position += 3  # conv + norm + activation
-
-        dconv_idx = position if has_dconv else None
-        if has_dconv:
-            position += 1
-
-        conv_transpose_idx = position
-        position += 1
-
-        post_norm_idx = position if needs_post else None
-
-        if has_rewrite:
-            rewrite_layer = getattr(decoder, "rewrite", None)
-            if isinstance(rewrite_layer, Conv1DWithPadding):
-                assign_conv(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
-            elif isinstance(rewrite_layer, tf.keras.layers.Conv2D):
-                assign_conv2d_layer(rewrite_layer, f"{prefix}.{rewrite_conv_idx}")
-
-            norm1 = getattr(decoder, "norm1", None)
-            if isinstance(norm1, GroupNorm):
-                assign_group_norm_layer(norm1, f"{prefix}.{rewrite_norm_idx}")
-
-        if dconv_idx is not None:
-            dconv_layer = getattr(decoder, "dconv", None)
+            dconv_layer = getattr(layer, "dconv", None)
             if isinstance(dconv_layer, DConv):
-                assign_dconv(dconv_layer, f"{prefix}.{dconv_idx}")
+                assign_dconv(dconv_layer, f"{prefix}.dconv")
 
-        conv_transpose_layer = getattr(decoder, "conv_transpose", None)
-        if isinstance(conv_transpose_layer, ConvTranspose1D):
-            assign_conv_transpose(conv_transpose_layer, f"{prefix}.{conv_transpose_idx}")
-        elif isinstance(conv_transpose_layer, tf.keras.layers.Conv2DTranspose):
-            assign_conv_transpose2d_layer(conv_transpose_layer, f"{prefix}.{conv_transpose_idx}")
+    def assign_decoder_branch(layers: Sequence[tf.keras.layers.Layer], prefix_root: str) -> None:
+        for idx, layer in enumerate(layers):
+            prefix = f"{prefix_root}.{idx}"
+            rewrite_layer = getattr(layer, "rewrite", None)
+            if isinstance(rewrite_layer, Conv1DWithPadding):
+                assign_conv(rewrite_layer, f"{prefix}.rewrite")
+            elif isinstance(rewrite_layer, tf.keras.layers.Conv2D):
+                assign_conv2d_layer(rewrite_layer, f"{prefix}.rewrite")
 
-        if post_norm_idx is not None:
-            norm2 = getattr(decoder, "norm2", None)
-            if isinstance(norm2, GroupNorm):
-                assign_group_norm_layer(norm2, f"{prefix}.{post_norm_idx}")
+            norm1 = getattr(layer, "norm1", None)
+            norm1_prefix = f"{prefix}.norm1"
+            if isinstance(norm1, GroupNorm) and norm1_prefix in state:
+                assign_group_norm_layer(norm1, norm1_prefix)
+
+            dconv_layer = getattr(layer, "dconv", None)
+            if isinstance(dconv_layer, DConv):
+                assign_dconv(dconv_layer, f"{prefix}.dconv")
+
+            conv_t_layer = getattr(layer, "conv_transpose", None)
+            if isinstance(conv_t_layer, ConvTranspose1D):
+                assign_conv_transpose(conv_t_layer, f"{prefix}.conv_tr")
+            elif isinstance(conv_t_layer, tf.keras.layers.Conv2DTranspose):
+                assign_conv_transpose2d_layer(conv_t_layer, f"{prefix}.conv_tr")
+
+            norm2 = getattr(layer, "norm2", None)
+            norm2_prefix = f"{prefix}.norm2"
+            if isinstance(norm2, GroupNorm) and norm2_prefix in state:
+                assign_group_norm_layer(norm2, norm2_prefix)
+
+    # Hybrid encoder/decoder branches ----------------------------------------------
+    assign_encoder_branch(model.encoder_layers, "encoder")
+    assign_encoder_branch(model.tencoder_layers, "tencoder")
+    assign_decoder_branch(model.decoder_layers, "decoder")
+    assign_decoder_branch(model.tdecoder_layers, "tdecoder")
 
     # Bottleneck BLSTM ---------------------------------------------------------------
     if model.lstm is not None:

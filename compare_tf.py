@@ -81,6 +81,13 @@ def inspect_torch_encoder_layer(
             if remainder != 0:
                 pad_right = layer.stride - remainder
                 y = F.pad(y, (0, pad_right))
+            prepared = y
+        else:
+            prepared = y
+            pad_amount = getattr(layer, "pad", 0)
+            if pad_amount:
+                prepared = F.pad(prepared, (0, 0, pad_amount, pad_amount))
+        outputs["prepared"] = prepared.detach().cpu().numpy()
 
         conv_out = layer.conv(y)
         outputs["conv"] = conv_out.detach().cpu().numpy()
@@ -135,7 +142,7 @@ def inspect_torch_encoder_layer(
 
 
 class TorchCapture:
-    """Registers forward hooks on HTDemucs modules to capture outputs."""
+    """Registers forward hooks on HTDemucs modules to capture inputs and outputs."""
 
     def __init__(self, model: HTDemucs):
         self.model = model
@@ -146,8 +153,25 @@ class TorchCapture:
     def _register_module_list(self, modules: Iterable[torch.nn.Module], prefix: str) -> None:
         for idx, module in enumerate(modules):
             name = f"{prefix}.{idx}"
+            pre_handle = module.register_forward_pre_hook(self._make_pre_hook(name))
+            self.handles.append(pre_handle)
             handle = module.register_forward_hook(self._make_hook(name))
             self.handles.append(handle)
+
+    def _make_pre_hook(self, name: str):
+        def hook(module: torch.nn.Module, inputs):  # noqa: ANN001
+            if not inputs:
+                return
+            primary = inputs[0]
+            if torch.is_tensor(primary):
+                self.storage.setdefault(f"{name}.input", []).append(primary.detach().cpu().numpy())
+            if len(inputs) > 1:
+                secondary = inputs[1]
+                if torch.is_tensor(secondary):
+                    self.storage.setdefault(f"{name}.inject", []).append(secondary.detach().cpu().numpy())
+                else:
+                    self.storage.setdefault(f"{name}.inject", []).append(None)
+        return hook
 
     def _make_hook(self, name: str):
         def hook(module: torch.nn.Module, inputs, output):  # noqa: ANN001
@@ -189,7 +213,11 @@ class TorchCapture:
 
 def prepare_models(config: Dict, checkpoint_path: Path) -> Tuple[HTDemucs, HTDemucsTF]:
     torch_model = HTDemucs(**config)
-    state = torch.load(checkpoint_path, map_location="cpu")
+    load_kwargs = {"map_location": "cpu"}
+    try:
+        state = torch.load(checkpoint_path, weights_only=False, **load_kwargs)
+    except TypeError:
+        state = torch.load(checkpoint_path, **load_kwargs)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     elif isinstance(state, dict) and "state" in state and isinstance(state["state"], dict):
@@ -249,7 +277,8 @@ def main() -> None:
 
     torch_model, tf_model = prepare_models(config, args.checkpoint)
     torch_model.to(args.device)
-    tf_model._debug_encoder_stage_targets = {1}
+    stage_indices = [0, 1]
+    tf_model._debug_encoder_stage_targets = set(stage_indices)
 
     with torch.no_grad():
         capture = TorchCapture(torch_model)
@@ -263,7 +292,14 @@ def main() -> None:
     tf_mix = tf.convert_to_tensor(mix.cpu().numpy())
     tf_out = tf_model(tf_mix, training=False)
 
-    def first_entry(key: str) -> Optional[np.ndarray]:
+    with torch.no_grad():
+        torch_mag = mag.detach().cpu()
+        mag_mean = torch_mag.mean(dim=(1, 2, 3), keepdim=True)
+        mag_std = torch_mag.std(dim=(1, 2, 3), keepdim=True)
+        torch_mag_norm = (torch_mag - mag_mean) / (1e-5 + mag_std)
+    torch_mag_norm_np = torch_mag_norm.numpy()
+
+    def first_entry(key: str):  # noqa: ANN001
         values = storage.get(key)
         if values:
             return values[0]
@@ -282,6 +318,7 @@ def main() -> None:
     transformer_xt = first_entry("crosstransformer.pre")
 
     encoder_tf = [tensor.numpy() for tensor in getattr(tf_model, "_debug_encoder", [])]
+    encoder_inputs_tf = [tensor.numpy() for tensor in getattr(tf_model, "_debug_encoder_inputs", [])]
     decoder_tf = [tensor.numpy() for tensor in getattr(tf_model, "_debug_decoder", [])]
     decoder_pre_tf = [tensor.numpy() for tensor in getattr(tf_model, "_debug_decoder_pre", [])]
     tencoder_tf = [tensor.numpy() for tensor in getattr(tf_model, "_debug_tencoder", [])]
@@ -324,68 +361,91 @@ def main() -> None:
             bias_diff = np.abs(torch_bias - tf_bias)
             print(f"  bias_mae={bias_diff.mean():.6e} bias_max={bias_diff.max():.6e}")
 
-    # Inspect intermediate outputs for the first mismatched encoder layer.
-    layer_index = 1
-    if layer_index < len(torch_model.encoder):
-        torch_input_prev_np = encoder_torch[layer_index - 1]
+    # Inspect intermediate outputs for selected encoder layers.
+    for layer_index in stage_indices:
+        if layer_index >= len(torch_model.encoder):
+            continue
+
+        torch_input_prev_np = first_entry(f"encoder.{layer_index}.input")
+        if torch_input_prev_np is None:
+            if layer_index == 0:
+                torch_input_prev_np = torch_mag_norm_np
+            elif layer_index - 1 < len(encoder_torch):
+                torch_input_prev_np = encoder_torch[layer_index - 1]
+
         if torch_input_prev_np is None:
             print(f"\nencoder[{layer_index}] stage breakdown: missing torch input capture")
+            continue
+
+        torch_layer = torch_model.encoder[layer_index]
+        torch_inject_raw = first_entry(f"encoder.{layer_index}.inject")
+        torch_inject_np: Optional[np.ndarray]
+        if isinstance(torch_inject_raw, np.ndarray):
+            torch_inject_np = torch_inject_raw
         else:
-            torch_layer = torch_model.encoder[layer_index]
-            torch_inject_np: Optional[np.ndarray] = None
-            if hasattr(torch_model, "tencoder") and layer_index < len(torch_model.tencoder):
-                tenc_layer = torch_model.tencoder[layer_index]
-                if getattr(tenc_layer, "empty", False) and layer_index < len(tencoder_torch):
-                    torch_inject_np = tencoder_torch[layer_index]
-            torch_stage = inspect_torch_encoder_layer(
-                torch_layer,
-                torch_input_prev_np,
-                torch.device(args.device),
-                inject=torch_inject_np,
-            )
+            torch_inject_np = None
+        torch_stage = inspect_torch_encoder_layer(
+            torch_layer,
+            torch_input_prev_np,
+            torch.device(args.device),
+            inject=torch_inject_np,
+        )
 
-            tf_stage_map_shared: Dict[str, np.ndarray] = {}
-            tf_stage_map_actual: Dict[str, np.ndarray] = {}
-            if layer_index < len(tf_model.encoder_layers):
-                tf_layer = tf_model.encoder_layers[layer_index]
+        tf_stage_map_shared: Dict[str, np.ndarray] = {}
+        tf_stage_map_actual: Dict[str, np.ndarray] = {}
+        if layer_index < len(tf_model.encoder_layers):
+            tf_layer = tf_model.encoder_layers[layer_index]
 
-                shared_input = tf.convert_to_tensor(torch_input_prev_np)
-                shared_inject = tf.convert_to_tensor(torch_inject_np) if torch_inject_np is not None else None
-                stage_debug_tf_shared: Dict[str, tf.Tensor] = {}
-                _ = tf_layer.call(shared_input, inject=shared_inject, training=False, debug=stage_debug_tf_shared)
-                tf_stage_map_shared = {key: value.numpy() for key, value in stage_debug_tf_shared.items()}
+            shared_input = tf.convert_to_tensor(torch_input_prev_np)
+            shared_inject = tf.convert_to_tensor(torch_inject_np) if torch_inject_np is not None else None
+            stage_debug_tf_shared: Dict[str, tf.Tensor] = {}
+            _ = tf_layer.call(shared_input, inject=shared_inject, training=False, debug=stage_debug_tf_shared)
+            tf_stage_map_shared = {key: value.numpy() for key, value in stage_debug_tf_shared.items()}
 
-                if layer_index < len(encoder_tf):
-                    tf_input_prev_np = encoder_tf[layer_index - 1]
-                    tf_input_prev = tf.convert_to_tensor(tf_input_prev_np)
-                    tf_inject_actual = None
-                    if hasattr(tf_model, "tencoder_layers") and layer_index < len(tf_model.tencoder_layers):
-                        tf_tenc_layer = tf_model.tencoder_layers[layer_index]
-                        if getattr(tf_tenc_layer, "empty", False) and layer_index < len(tencoder_tf):
-                            tf_inject_actual = tf.convert_to_tensor(tencoder_tf[layer_index])
-                    stage_debug_tf_actual: Dict[str, tf.Tensor] = {}
-                    _ = tf_layer.call(tf_input_prev, inject=tf_inject_actual, training=False, debug=stage_debug_tf_actual)
-                    tf_stage_map_actual = {key: value.numpy() for key, value in stage_debug_tf_actual.items()}
+            if layer_index < len(encoder_inputs_tf):
+                tf_input_prev_np = encoder_inputs_tf[layer_index]
+                tf_input_prev = tf.convert_to_tensor(tf_input_prev_np)
+                tf_inject_actual = None
+                if hasattr(tf_model, "tencoder_layers") and layer_index < len(tf_model.tencoder_layers):
+                    tf_tenc_layer = tf_model.tencoder_layers[layer_index]
+                    if getattr(tf_tenc_layer, "empty", False) and layer_index < len(tencoder_tf):
+                        tf_inject_actual = tf.convert_to_tensor(tencoder_tf[layer_index])
+                stage_debug_tf_actual: Dict[str, tf.Tensor] = {}
+                _ = tf_layer.call(tf_input_prev, inject=tf_inject_actual, training=False, debug=stage_debug_tf_actual)
+                tf_stage_map_actual = {key: value.numpy() for key, value in stage_debug_tf_actual.items()}
 
-            if tf_stage_map_shared:
-                print(f"\nencoder[{layer_index}] stage breakdown:")
-                shared_keys = sorted(set(torch_stage.keys()) & set(tf_stage_map_shared.keys()))
-                for key in shared_keys:
-                    mae, max_abs = numpy_mae(torch_stage[key], tf_stage_map_shared[key])
-                    print(f"  {key}: mae={mae:.6e} max={max_abs:.6e}")
-                missing_tf = set(torch_stage.keys()) - set(tf_stage_map_shared.keys())
-                missing_torch = set(tf_stage_map_shared.keys()) - set(torch_stage.keys())
-                if missing_tf:
-                    print(f"  ⚠ missing TF stages: {sorted(missing_tf)}")
-                if missing_torch:
-                    print(f"  ⚠ missing torch stages: {sorted(missing_torch)}")
+        if tf_stage_map_shared:
+            print(f"\nencoder[{layer_index}] stage breakdown:")
+            shared_keys = sorted(set(torch_stage.keys()) & set(tf_stage_map_shared.keys()))
+            for key in shared_keys:
+                mae, max_abs = numpy_mae(torch_stage[key], tf_stage_map_shared[key])
+                print(f"  {key}: mae={mae:.6e} max={max_abs:.6e}")
+            missing_tf = set(torch_stage.keys()) - set(tf_stage_map_shared.keys())
+            missing_torch = set(tf_stage_map_shared.keys()) - set(torch_stage.keys())
+            if missing_tf:
+                print(f"  ⚠ missing TF stages: {sorted(missing_tf)}")
+            if missing_torch:
+                print(f"  ⚠ missing torch stages: {sorted(missing_torch)}")
 
-                if tf_stage_map_actual:
-                    input_diff = numpy_mae(torch_input_prev_np, encoder_tf[layer_index - 1]) if layer_index - 1 < len(encoder_tf) else (None, None)
-                    if input_diff[0] is not None:
-                        print(f"  input mae={input_diff[0]:.6e} max={input_diff[1]:.6e}")
-            else:
-                print(f"\nencoder[{layer_index}] stage breakdown: TF stage data unavailable")
+            if tf_stage_map_actual:
+                actual_keys = sorted(set(torch_stage.keys()) & set(tf_stage_map_actual.keys()))
+                if actual_keys:
+                    print("  torch vs tf actual:")
+                    for key in actual_keys:
+                        mae, max_abs = numpy_mae(torch_stage[key], tf_stage_map_actual[key])
+                        print(f"    {key}: mae={mae:.6e} max={max_abs:.6e}")
+                shared_actual_keys = sorted(set(tf_stage_map_shared.keys()) & set(tf_stage_map_actual.keys()))
+                if shared_actual_keys:
+                    print("  tf actual vs shared:")
+                    for key in shared_actual_keys:
+                        mae, max_abs = numpy_mae(tf_stage_map_shared[key], tf_stage_map_actual[key])
+                        print(f"    {key}: mae={mae:.6e} max={max_abs:.6e}")
+                input_ref = torch_input_prev_np
+                input_tf = encoder_inputs_tf[layer_index]
+                input_mae, input_max = numpy_mae(input_ref, input_tf)
+                print(f"  input mae={input_mae:.6e} max={input_max:.6e}")
+        else:
+            print(f"\nencoder[{layer_index}] stage breakdown: TF stage data unavailable")
 
     if transformer_x is not None and transformer_xt is not None and transformer_tf_out is not None:
         tf_x, tf_xt = transformer_tf_out

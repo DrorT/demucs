@@ -773,6 +773,7 @@ class HTDemucsTF(tf.keras.Model):
         """Reset debug storage containers."""
 
         self._debug_encoder: List[tf.Tensor] = []
+        self._debug_encoder_inputs: List[tf.Tensor] = []
         self._debug_encoder_stages: List[Dict[str, tf.Tensor]] = []
         self._debug_tencoder: List[tf.Tensor] = []
         self._debug_decoder: List[tf.Tensor] = []
@@ -865,6 +866,7 @@ class HTDemucsTF(tf.keras.Model):
         else:
             # Ensure stale buffers don't survive between runs
             self._debug_encoder = []
+            self._debug_encoder_inputs = []
             self._debug_encoder_stages = []
             self._debug_tencoder = []
             self._debug_decoder = []
@@ -917,6 +919,8 @@ class HTDemucsTF(tf.keras.Model):
                     inject = xt
                 else:
                     saved_t.append(xt)
+            if collect_debug:
+                self._debug_encoder_inputs.append(tf.identity(x))
             capture_stage = (
                 collect_debug
                 and isinstance(encode, HEncLayer)

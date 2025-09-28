@@ -38,7 +38,11 @@ def load_pytorch_state_dict(checkpoint: Path | str) -> Dict[str, torch.Tensor]:
     """
 
     checkpoint = Path(checkpoint)
-    obj = torch.load(checkpoint, map_location="cpu")
+    load_kwargs = {"map_location": "cpu"}
+    try:
+        obj = torch.load(checkpoint, weights_only=False, **load_kwargs)
+    except TypeError:
+        obj = torch.load(checkpoint, **load_kwargs)
     if isinstance(obj, Mapping):
         if "state_dict" in obj:
             state = obj["state_dict"]

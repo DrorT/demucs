@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import tensorflow as tf
 
@@ -148,21 +148,34 @@ class HEncLayer(tf.keras.layers.Layer):
         inputs: tf.Tensor,
         inject: Optional[tf.Tensor] = None,
         training: bool = False,
+        debug: Optional[Dict[str, tf.Tensor]] = None,
     ) -> tf.Tensor:  # type: ignore[override]
         x = self._prepare_input(inputs)
+        if debug is not None:
+            debug["prepared"] = tf.identity(x)
         if self.freq:
             x_nhwc = tf.transpose(x, perm=[0, 2, 3, 1])
             y = self.conv(x_nhwc)
             y = tf.transpose(y, perm=[0, 3, 1, 2])
         else:
             y = self.conv(x)
+        if debug is not None:
+            debug["conv"] = tf.identity(y)
         if self.empty:
+            if debug is not None:
+                debug["final"] = tf.identity(y)
             return y
         if inject is not None:
             y = y + inject
+        if debug is not None:
+            debug["post_inject"] = tf.identity(y)
         if self.norm1 is not None:
             y = self.norm1(y)
+        if debug is not None:
+            debug["norm1"] = tf.identity(y)
         y = tf.nn.gelu(y)
+        if debug is not None:
+            debug["gelu"] = tf.identity(y)
         if self.dconv is not None:
             if self.freq:
                 # reshape to (B*Fr, C, T)
@@ -176,7 +189,11 @@ class HEncLayer(tf.keras.layers.Layer):
                 y = tf.transpose(tf.reshape(y_flat, [batch, freq, channels, time]), perm=[0, 2, 1, 3])
             else:
                 y = self.dconv(y, training=training)
+        if debug is not None:
+            debug["dconv"] = tf.identity(y)
         if self.rewrite is None:
+            if debug is not None:
+                debug["final"] = tf.identity(y)
             return y
         if self.freq:
             z_input = tf.transpose(y, perm=[0, 2, 3, 1])
@@ -184,10 +201,18 @@ class HEncLayer(tf.keras.layers.Layer):
             z = tf.transpose(z, perm=[0, 3, 1, 2])
         else:
             z = self.rewrite(y)
+        if debug is not None:
+            debug["rewrite"] = tf.identity(z)
         if self.norm2 is not None:
             z = self.norm2(z)
+        if debug is not None:
+            debug["norm2"] = tf.identity(z)
         a, b = tf.split(z, 2, axis=1)
-        return a * tf.nn.sigmoid(b)
+        out = a * tf.nn.sigmoid(b)
+        if debug is not None:
+            debug["glu"] = tf.identity(out)
+            debug["final"] = tf.identity(out)
+        return out
 
 
 class HDecLayer(tf.keras.layers.Layer):
@@ -723,16 +748,44 @@ class HTDemucsTF(tf.keras.Model):
             self.crosstransformer = None
         self.transformer_channels = transformer_channels
         self.freqs_out = freqs
+        self._collect_debug: bool = False
+        self._debug_encoder_stage_targets: Optional[Set[int]] = None
+        self._reset_debug_buffers()
 
     def load_pytorch_checkpoint(self, checkpoint: str | tf.compat.PathLike[str]) -> Any:
         from demucs_tf.checkpoints.loader import load_demucs_tf_weights
 
         return load_demucs_tf_weights(self, checkpoint)
 
+    def enable_debug(self) -> None:
+        """Enable collection of intermediate tensors during inference."""
+
+        self._collect_debug = True
+
+    def disable_debug(self, clear: bool = True) -> None:
+        """Disable intermediate tensor collection and optionally clear buffers."""
+
+        self._collect_debug = False
+        if clear:
+            self._reset_debug_buffers()
+
+    def _reset_debug_buffers(self) -> None:
+        """Reset debug storage containers."""
+
+        self._debug_encoder: List[tf.Tensor] = []
+        self._debug_encoder_stages: List[Dict[str, tf.Tensor]] = []
+        self._debug_tencoder: List[tf.Tensor] = []
+        self._debug_decoder: List[tf.Tensor] = []
+        self._debug_decoder_pre: List[tf.Tensor] = []
+        self._debug_tdecoder: List[tf.Tensor] = []
+        self._debug_crosstransformer_in: Optional[Tuple[tf.Tensor, tf.Tensor]] = None
+        self._debug_crosstransformer_out: Optional[Tuple[tf.Tensor, tf.Tensor]] = None
+        self._debug_spec_meta: Optional[Tuple[tf.Tensor, tf.Tensor, tf.Tensor]] = None
+
     def _spec(self, mix: tf.Tensor) -> tf.Tensor:
         hop = tf.constant(self.hop_length, dtype=tf.int32)
         length = tf.shape(mix)[-1]
-        frames = tf.cast(tf.math.ceil(tf.cast(length, tf.float32) / tf.cast(hop, tf.float32)), tf.int32)
+        frames = tf.math.floordiv(length + hop - 1, hop)
         pad_val = (self.hop_length // 2) * 3
         pad_left = tf.constant(pad_val, dtype=tf.int32)
         right_extra = frames * hop - length
@@ -751,6 +804,8 @@ class HTDemucsTF(tf.keras.Model):
         start = tf.minimum(tf.constant(2, dtype=tf.int32), total_frames - frames)
         end = start + frames
         spec = spec[..., start:end]
+        if getattr(self, "_collect_debug", False):
+            self._debug_spec_meta = (tf.identity(length), tf.identity(frames), tf.identity(total_frames))
         return spec
 
     def _ispec(self, spec: tf.Tensor, length: tf.Tensor, scale: int = 0) -> tf.Tensor:
@@ -770,14 +825,28 @@ class HTDemucsTF(tf.keras.Model):
 
     def _magnitude(self, spec: tf.Tensor) -> tf.Tensor:
         if self.cac:
-            real = tf.math.real(spec)
-            imag = tf.math.imag(spec)
-            return tf.concat([real, imag], axis=1)
+            components = tf.stack([tf.math.real(spec), tf.math.imag(spec)], axis=-1)
+            components = tf.transpose(components, perm=[0, 1, 4, 2, 3])
+            shape = tf.shape(components)
+            batch = shape[0]
+            channels = shape[1]
+            freq = shape[3]
+            frames = shape[4]
+            return tf.reshape(components, [batch, channels * 2, freq, frames])
         return tf.abs(spec)
 
     def _mask(self, mix_spec: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
         if self.cac:
-            real, imag = tf.split(mask, num_or_size_splits=2, axis=2)
+            b = tf.shape(mask)[0]
+            s = tf.shape(mask)[1]
+            channels_twice = tf.shape(mask)[2]
+            freq = tf.shape(mask)[3]
+            frames = tf.shape(mask)[4]
+            channels = channels_twice // 2
+            mask_reshaped = tf.reshape(mask, [b, s, channels, 2, freq, frames])
+            mask_perm = tf.transpose(mask_reshaped, perm=[0, 1, 2, 4, 5, 3])
+            real = mask_perm[..., 0]
+            imag = mask_perm[..., 1]
             return tf.complex(real, imag)
         mix_expanded = mix_spec[:, None, ...]
         denom = tf.maximum(tf.abs(mix_expanded), tf.constant(1e-8, dtype=mix_spec.dtype))
@@ -790,6 +859,19 @@ class HTDemucsTF(tf.keras.Model):
         batch = mix_shape[0]
         original_length = mix_shape[-1]
         length_pre_pad = tf.constant(-1, dtype=tf.int32)
+        collect_debug = bool(getattr(self, "_collect_debug", False)) and not training
+        if collect_debug:
+            self._reset_debug_buffers()
+        else:
+            # Ensure stale buffers don't survive between runs
+            self._debug_encoder = []
+            self._debug_encoder_stages = []
+            self._debug_tencoder = []
+            self._debug_decoder = []
+            self._debug_decoder_pre = []
+            self._debug_tdecoder = []
+            self._debug_crosstransformer_in = None
+            self._debug_crosstransformer_out = None
 
         if self.use_train_segment and not training:
             training_length = tf.constant(int(round(self.segment * self.samplerate)), dtype=tf.int32)
@@ -817,19 +899,42 @@ class HTDemucsTF(tf.keras.Model):
         saved_t: List[tf.Tensor] = []
         lengths: List[tf.Tensor] = []
         lengths_t: List[tf.Tensor] = []
+        lengths_record: List[tf.Tensor] = []
+        lengths_t_record: List[tf.Tensor] = []
 
         for idx, encode in enumerate(self.encoder_layers):
             lengths.append(tf.shape(x)[-1])
+            lengths_record.append(tf.shape(x)[-1])
             inject: Optional[tf.Tensor] = None
             if idx < len(self.tencoder_layers):
                 tenc = self.tencoder_layers[idx]
                 lengths_t.append(tf.shape(xt)[-1])
+                lengths_t_record.append(tf.shape(xt)[-1])
                 xt = tenc(xt, training=training)
+                if collect_debug:
+                    self._debug_tencoder.append(tf.identity(xt))
                 if getattr(tenc, "empty", False):
                     inject = xt
                 else:
                     saved_t.append(xt)
-            x = encode(x, inject=inject, training=training)
+            capture_stage = (
+                collect_debug
+                and isinstance(encode, HEncLayer)
+                and (
+                    self._debug_encoder_stage_targets is None
+                    or idx in self._debug_encoder_stage_targets
+                )
+            )
+            if capture_stage:
+                stage_debug: Dict[str, tf.Tensor] = {}
+                x = encode(x, inject=inject, training=training, debug=stage_debug)
+                self._debug_encoder_stages.append({key: tf.identity(value) for key, value in stage_debug.items()})
+            else:
+                x = encode(x, inject=inject, training=training)
+                if collect_debug:
+                    self._debug_encoder_stages.append({})
+            if collect_debug:
+                self._debug_encoder.append(tf.identity(x))
             if idx == 0 and self.freq_emb is not None:
                 freq_dim = tf.shape(x)[-2]
                 emb = self.freq_emb(tf.range(freq_dim))
@@ -858,6 +963,8 @@ class HTDemucsTF(tf.keras.Model):
                     ),
                 )
                 xt = self.channel_upsampler_t(xt)
+            if collect_debug:
+                self._debug_crosstransformer_in = (tf.identity(x), tf.identity(xt))
             x, xt = self.crosstransformer(x, xt, training=training)
             if self.channel_downsampler is not None and self.channel_downsampler_t is not None:
                 x_flat = tf.reshape(
@@ -869,12 +976,17 @@ class HTDemucsTF(tf.keras.Model):
                 x_flat = self.channel_downsampler(x_flat)
                 x = tf.reshape(x_flat, tf.stack([batch, spec_channels, freq_bins, time_frames]))
                 xt = self.channel_downsampler_t(xt)
+            if collect_debug:
+                self._debug_crosstransformer_out = (tf.identity(x), tf.identity(xt))
 
         offset = self.depth - len(self.tdecoder_layers)
         for idx, decode in enumerate(self.decoder_layers):
             skip = saved.pop()
             length_value = lengths.pop()
             x, pre = decode(x, skip, length_value, training=training)
+            if collect_debug:
+                self._debug_decoder_pre.append(tf.identity(pre))
+                self._debug_decoder.append(tf.identity(x))
             if idx >= offset and self.tdecoder_layers:
                 tdec = self.tdecoder_layers[idx - offset]
                 length_time = lengths_t.pop()
@@ -884,6 +996,8 @@ class HTDemucsTF(tf.keras.Model):
                 else:
                     skip_t = saved_t.pop()
                     xt, _ = tdec(xt, skip_t, length_time, training=training)
+                if collect_debug:
+                    self._debug_tdecoder.append(tf.identity(xt))
 
         freq = tf.shape(x)[-2]
         frames = tf.shape(x)[-1]
@@ -901,6 +1015,13 @@ class HTDemucsTF(tf.keras.Model):
         else:
             time_length = target_length
             xt = tf.zeros([batch, self.num_sources, self.audio_channels, time_length], dtype=mix.dtype)
+
+        if not training:
+            self._debug_spec = spec
+            self._debug_mask = x
+            self._debug_time = xt
+            self._debug_freq_lengths = [tf.identity(item) for item in lengths_record]
+            self._debug_time_lengths = [tf.identity(item) for item in lengths_t_record]
 
         masked = self._mask(spec, x)
         b = tf.shape(masked)[0]

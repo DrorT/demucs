@@ -59,7 +59,7 @@ class GroupNorm(tf.keras.layers.Layer):
             [[batch, self.groups, group_channels], trailing], axis=0
         )
         x = tf.reshape(x, new_shape)
-        axes = list(range(3, len(new_shape)))
+        axes = list(range(2, len(new_shape)))
         mean = tf.reduce_mean(x, axis=axes, keepdims=True)
         variance = tf.reduce_mean(tf.square(x - mean), axis=axes, keepdims=True)
         x = (x - mean) * tf.math.rsqrt(variance + self.epsilon)

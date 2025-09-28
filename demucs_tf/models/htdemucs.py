@@ -57,8 +57,6 @@ class HEncLayer(tf.keras.layers.Layer):
         self.stride = settings.stride
         self.pad_amount = settings.kernel_size // 4 if settings.pad else 0
         self.pad = self.pad_amount
-        data_format = "channels_first"
-
         if self.freq:
             kernel = (settings.kernel_size, 1)
             stride = (settings.stride, 1)
@@ -67,7 +65,6 @@ class HEncLayer(tf.keras.layers.Layer):
                 kernel_size=kernel,
                 strides=stride,
                 padding="valid",
-                data_format=data_format,
                 use_bias=True,
             )
         else:
@@ -97,7 +94,6 @@ class HEncLayer(tf.keras.layers.Layer):
                     kernel_size=kernel_rewrite,
                     strides=(1, 1),
                     padding="same",
-                    data_format=data_format,
                     use_bias=True,
                 )
             else:
@@ -154,7 +150,12 @@ class HEncLayer(tf.keras.layers.Layer):
         training: bool = False,
     ) -> tf.Tensor:  # type: ignore[override]
         x = self._prepare_input(inputs)
-        y = self.conv(x)
+        if self.freq:
+            x_nhwc = tf.transpose(x, perm=[0, 2, 3, 1])
+            y = self.conv(x_nhwc)
+            y = tf.transpose(y, perm=[0, 3, 1, 2])
+        else:
+            y = self.conv(x)
         if self.empty:
             return y
         if inject is not None:
@@ -177,7 +178,12 @@ class HEncLayer(tf.keras.layers.Layer):
                 y = self.dconv(y, training=training)
         if self.rewrite is None:
             return y
-        z = self.rewrite(y)
+        if self.freq:
+            z_input = tf.transpose(y, perm=[0, 2, 3, 1])
+            z = self.rewrite(z_input)
+            z = tf.transpose(z, perm=[0, 3, 1, 2])
+        else:
+            z = self.rewrite(y)
         if self.norm2 is not None:
             z = self.norm2(z)
         a, b = tf.split(z, 2, axis=1)
@@ -209,8 +215,6 @@ class HDecLayer(tf.keras.layers.Layer):
         self.stride = settings.stride
         self.pad_amount = settings.kernel_size // 4 if settings.pad else 0
         self.pad = self.pad_amount
-        data_format = "channels_first"
-
         if self.freq:
             kernel = (settings.kernel_size, 1)
             stride = (settings.stride, 1)
@@ -219,7 +223,6 @@ class HDecLayer(tf.keras.layers.Layer):
                 kernel_size=kernel,
                 strides=stride,
                 padding="valid",
-                data_format=data_format,
                 use_bias=True,
             )
         else:
@@ -247,7 +250,6 @@ class HDecLayer(tf.keras.layers.Layer):
                         kernel_size=kernel_rewrite,
                         strides=(1, 1),
                         padding="same",
-                        data_format=data_format,
                         use_bias=True,
                     )
                 else:
@@ -296,10 +298,15 @@ class HDecLayer(tf.keras.layers.Layer):
             if skip is not None:
                 y = y + skip
             if self.rewrite is not None:
-                y = self.rewrite(y)
+                if self.freq:
+                    rewrite_input = tf.transpose(y, perm=[0, 2, 3, 1])
+                    rewrite_out = self.rewrite(rewrite_input)
+                    rewrite_out = tf.transpose(rewrite_out, perm=[0, 3, 1, 2])
+                else:
+                    rewrite_out = self.rewrite(y)
                 if self.norm1 is not None:
-                    y = self.norm1(y)
-                a, b = tf.split(y, 2, axis=1)
+                    rewrite_out = self.norm1(rewrite_out)
+                a, b = tf.split(rewrite_out, 2, axis=1)
                 y = a * tf.nn.sigmoid(b)
             if self.dconv is not None:
                 if self.freq:
@@ -315,7 +322,12 @@ class HDecLayer(tf.keras.layers.Layer):
                     y = self.dconv(y, training=training)
             pre = y
 
-        z = self.conv_transpose(y)
+        if self.freq:
+            z_input = tf.transpose(y, perm=[0, 2, 3, 1])
+            z = self.conv_transpose(z_input)
+            z = tf.transpose(z, perm=[0, 3, 1, 2])
+        else:
+            z = self.conv_transpose(y)
         if self.norm2 is not None:
             z = self.norm2(z)
 
@@ -326,11 +338,15 @@ class HDecLayer(tf.keras.layers.Layer):
             left = self.pad_amount
             if length is not None:
                 if isinstance(length, tf.Tensor):
-                    length = tf.cast(length, tf.int32)
-                    indices = tf.range(length) + left
-                    z = tf.gather(z, indices, axis=-1)
+                    target = tf.cast(length, tf.int32)
                 else:
-                    z = z[..., left : left + length]
+                    target = tf.constant(length, dtype=tf.int32)
+                current = tf.shape(z)[-1]
+                target = tf.minimum(target, current)
+                start = tf.minimum(left, current - target)
+                start = tf.maximum(start, 0)
+                end = start + target
+                z = z[..., start:end]
         if not self.last:
             z = tf.nn.gelu(z)
         return z, pre
@@ -731,8 +747,10 @@ class HTDemucsTF(tf.keras.Model):
         )
         padded = tf.pad(mix, paddings, mode="REFLECT")
         spec = stft(padded, self.nfft, hop_length=self.hop_length)[..., :-1, :]
-        indices = tf.range(frames) + 2
-        spec = tf.gather(spec, indices, axis=-1)
+        total_frames = tf.shape(spec)[-1]
+        start = tf.minimum(tf.constant(2, dtype=tf.int32), total_frames - frames)
+        end = start + frames
+        spec = spec[..., start:end]
         return spec
 
     def _ispec(self, spec: tf.Tensor, length: tf.Tensor, scale: int = 0) -> tf.Tensor:

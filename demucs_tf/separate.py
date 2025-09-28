@@ -13,7 +13,7 @@ import soundfile as sf
 import tensorflow as tf
 import torch
 
-from demucs_tf.models import DemucsTF
+from demucs_tf.models import DemucsTF, HTDemucsTF
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def load_audio(path: Path, target_sr: int) -> np.ndarray:
 # -----------------------------------------------------------------------------
 
 
-_EXPECTED_KEYS: Sequence[str] = (
+_DEM_UCS_KEYS: Sequence[str] = (
     "audio_channels",
     "channels",
     "growth",
@@ -81,6 +81,72 @@ _EXPECTED_KEYS: Sequence[str] = (
     "resample",
     "samplerate",
     "segment",
+)
+
+_HT_DEMUCS_KEYS: Sequence[str] = (
+    "audio_channels",
+    "channels",
+    "channels_time",
+    "growth",
+    "nfft",
+    "wiener_iters",
+    "end_iters",
+    "wiener_residual",
+    "cac",
+    "depth",
+    "rewrite",
+    "multi_freqs",
+    "multi_freqs_depth",
+    "freq_emb",
+    "emb_scale",
+    "emb_boost",
+    "emb_smooth",
+    "kernel_size",
+    "stride",
+    "time_stride",
+    "context",
+    "context_enc",
+    "norm_starts",
+    "norm_groups",
+    "dconv_mode",
+    "dconv_depth",
+    "dconv_comp",
+    "dconv_init",
+    "bottom_channels",
+    "t_layers",
+    "t_emb",
+    "t_hidden_scale",
+    "t_heads",
+    "t_dropout",
+    "t_layer_scale",
+    "t_gelu",
+    "t_max_positions",
+    "t_max_period",
+    "t_weight_pos_embed",
+    "t_cape_mean_normalize",
+    "t_cape_augment",
+    "t_cape_glob_loc_scale",
+    "t_sin_random_shift",
+    "t_norm_in",
+    "t_norm_in_group",
+    "t_group_norm",
+    "t_norm_first",
+    "t_norm_out",
+    "t_weight_decay",
+    "t_lr",
+    "t_sparse_self_attn",
+    "t_sparse_cross_attn",
+    "t_mask_type",
+    "t_mask_random_seed",
+    "t_sparse_attn_window",
+    "t_global_window",
+    "t_sparsity",
+    "t_auto_sparsity",
+    "t_cross_first",
+    "rescale",
+    "samplerate",
+    "segment",
+    "use_train_segment",
 )
 
 
@@ -110,10 +176,14 @@ def _extract_checkpoint_config(state: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+def _collect_kwargs(config: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]:
+    return {key: config[key] for key in keys if key in config}
+
+
 def build_model_from_checkpoint(
     checkpoint_path: Path,
     config_override: Path | None,
-) -> DemucsTF:
+) -> tf.keras.Model:
     LOGGER.info("Loading checkpoint %s", checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint.get("state_dict", checkpoint)
@@ -127,10 +197,17 @@ def build_model_from_checkpoint(
         )
         config["sources"] = ["drums", "bass", "other", "vocals"]
 
-    kwargs = {key: config[key] for key in _EXPECTED_KEYS if key in config}
+    model_name = str(config.get("model", "demucs")).lower()
     sources = config["sources"]
 
-    model = DemucsTF(sources=sources, **kwargs)
+    if model_name in {"htdemucs", "hybrid_transformer", "ht"}:
+        kwargs = _collect_kwargs(config, _HT_DEMUCS_KEYS)
+        kwargs.setdefault("emb_boost", 3.0)
+        kwargs.setdefault("use_train_segment", True)
+        model = HTDemucsTF(sources=sources, **kwargs)
+    else:
+        kwargs = _collect_kwargs(config, _DEM_UCS_KEYS)
+        model = DemucsTF(sources=sources, **kwargs)
     report = model.load_pytorch_checkpoint(checkpoint_path)
     if report.missing:
         LOGGER.warning("Missing weights: \n%s", "\n".join(sorted(report.missing)))

@@ -179,7 +179,7 @@ def assign_conv2d_weights(
     """Assign PyTorch Conv2d weights to a :class:`tf.keras.layers.Conv2D`."""
 
     if example_shape is None:
-        example_shape = [None, weight.shape[1], weight.shape[2], weight.shape[3]]
+        example_shape = [None, weight.shape[2], weight.shape[3], weight.shape[1]]
     if not layer.built:
         layer.build(example_shape)
     kernel = pytorch_to_tf_conv2d(weight)
@@ -199,7 +199,7 @@ def assign_conv_transpose2d_weights(
     if example_shape is None:
         height = max(int(weight.shape[2]), 1)
         width = max(int(weight.shape[3]), 1)
-        example_shape = [None, weight.shape[0], height, width]
+        example_shape = [None, height, width, weight.shape[0]]
     if not layer.built:
         layer.build(example_shape)
     kernel = pytorch_to_tf_conv_transpose2d(weight)

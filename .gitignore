@@ -21,3 +21,4 @@ htdemucs_core.onnx
 /separated_simple
 /separated_onnx
 *.mp3
+/remote

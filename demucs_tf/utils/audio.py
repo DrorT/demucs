@@ -129,6 +129,7 @@ def stft(
     hop_length: int | None = None,
     pad: int = 0,
     window: tf.Tensor | None = None,
+    center: bool = True,
 ) -> tf.Tensor:
     """Compute a complex STFT matching Demucs settings.
 
@@ -146,6 +147,13 @@ def stft(
         hop_length = n_fft // 4
     batch = tf.shape(x)[0]
     channels = tf.shape(x)[1]
+    if center:
+        pad_amount = n_fft // 2
+        x = tf.pad(
+            x,
+            [[0, 0], [0, 0], [pad_amount, pad_amount]],
+            mode="REFLECT",
+        )
     length = tf.shape(x)[2]
     x_flat = tf.reshape(x, [-1, length])
     window = window or tf.signal.hann_window(n_fft, periodic=True)
@@ -158,9 +166,10 @@ def stft(
         pad_end=False,
     )
     z = z / tf.sqrt(tf.cast(n_fft, z.dtype))
-    freqs = tf.shape(z)[-2]
-    frames = tf.shape(z)[-1]
-    return tf.reshape(z, [batch, channels, freqs, frames])
+    frames = tf.shape(z)[-2]
+    freqs = tf.shape(z)[-1]
+    z = tf.reshape(z, [batch, channels, frames, freqs])
+    return tf.transpose(z, perm=[0, 1, 3, 2])
 
 
 def istft(

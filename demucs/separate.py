@@ -102,6 +102,10 @@ def get_parser():
 def main(opts=None):
     parser = get_parser()
     args = parser.parse_args(opts)
+    
+    # Print PyTorch version
+    print(f"Using PyTorch version: {th.__version__}")
+    
     if args.list_models:
         models = list_models(args.repo)
         print("Bag of models:", end="\n    ")
